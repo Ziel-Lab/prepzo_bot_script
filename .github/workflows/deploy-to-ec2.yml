@@ -593,7 +593,7 @@ jobs:
                 if [ $? -ne 0 ]; then
                   echo "nc failed, trying with socat..."
                   sudo yum install -y socat || true
-                  sudo socat TCP-LISTEN:80,fork,reuseaddr EXEC:'echo -e \"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\\\"status\\\":\\\"ok\\\"}"' &
+                  sudo socat TCP-LISTEN:80,fork,reuseaddr EXEC:'echo -e \"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\\\"status\\\":\\\"ok\\\"}\"' &
                 fi
               fi
 EOF
