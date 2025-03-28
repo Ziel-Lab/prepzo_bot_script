@@ -70,7 +70,7 @@ jobs:
           echo "Default stack name detected: $DEFAULT_STACK_NAME"
           
           # Create the stack file
-          cat > lib/prepzo-bot-stack.ts << 'EOL'
+          cat > lib/prepzo-bot-stack.ts << 'EOF'
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -181,10 +181,10 @@ export class PrepzoBotStack extends cdk.Stack {
     });
   }
 }
-EOL
-          
+EOF
+
           # Create the main entry point file
-          cat > bin/prepzo-bot.ts << 'EOL'
+          cat > bin/prepzo-bot.ts << 'EOF'
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
@@ -197,8 +197,8 @@ new PrepzoBotStack(app, 'PrepzoBotStack', {
     region: process.env.CDK_DEFAULT_REGION 
   },
 });
-EOL
-          
+EOF
+
           # Show the stack
           echo "Available stacks after creation:"
           npx cdk ls || echo "Failed to list stacks"
