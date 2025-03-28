@@ -275,121 +275,62 @@ jobs:
             fi
           }
       
-      - name: Deploy CDK stack
-        working-directory: ./infrastructure
+      - name: Deploy CDK Stack
         run: |
-          echo "Starting CDK deployment..."
-          # Print env variables
-          echo "AWS_REGION: $AWS_REGION"
-          echo "AWS_ACCOUNT: $(aws sts get-caller-identity --query Account --output text)"
-          
-          # List files to debug
-          echo "Checking CDK project structure:"
+          # Debug CDK initialization
+          echo "Created CDK project structure:"
           ls -la
-          echo "Main CDK app file (bin/prepzo-bot.ts):"
-          cat bin/prepzo-bot.ts
-          echo "Stack definition (lib/prepzo-bot-stack.ts):"
-          cat lib/prepzo-bot-stack.ts
           
-          # Check if bootstrap was successful
-          echo "Checking CDK bootstrap status:"
-          CDK_TOOLKIT=$(aws cloudformation describe-stacks --stack-name CDKToolkit --query "Stacks[0].StackStatus" --output text || echo "NOT_FOUND")
-          echo "CDKToolkit stack status: $CDK_TOOLKIT"
+          # Check default app.ts file
+          echo "Default app.ts content:"
+          cat lib/infrastructure-stack.ts || echo "File not found"
           
-          if [ "$CDK_TOOLKIT" != "CREATE_COMPLETE" ] && [ "$CDK_TOOLKIT" != "UPDATE_COMPLETE" ]; then
-            echo "⚠️ CDK Bootstrap may not have completed successfully."
-            echo "Checking CDKToolkit stack events for errors:"
-            aws cloudformation describe-stack-events --stack-name CDKToolkit --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].{Resource:LogicalResourceId, Reason:ResourceStatusReason}" --output table || echo "Could not retrieve CDKToolkit events"
-            
-            echo "Trying to continue with deployment anyway..."
-          fi
+          # Check CDK bootstrap status
+          echo "Checking CDK bootstrap status..."
+          aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].StackStatus' || echo "CDKToolkit stack not found"
           
-          # List synthesized stack to debug
+          # List synthesized stacks
           echo "Running cdk ls to see what stacks will be deployed:"
           cdk ls
           
           # Deploy with verbose output
           echo "Deploying stack (this may take several minutes)..."
-          # Deploy without specifying stack name to use default stack
           cdk deploy --all --require-approval never --verbose
           
-          # Check if deployment was successful
-          if [ $? -ne 0 ]; then
-            echo "CDK deployment failed!"
-            echo "Checking CloudFormation for recently created/failed stacks:"
-            aws cloudformation list-stacks --query "StackSummaries[?CreationTime>='$(date -u -d '1 hour ago' +'%Y-%m-%dT%H:%M:%SZ')']" --output table
-            exit 1
-          fi
-          echo "CDK deployment completed."
+          # List all stacks after deployment
           echo "Listing all stacks after deployment:"
-          cdk ls
-          aws cloudformation list-stacks --query "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName" --output text
-      
-      - name: Extract instance IP from CDK outputs
-        id: get-ip
-        run: |
-          # Wait a moment for outputs to be available
-          sleep 15
+          aws cloudformation list-stacks --query 'StackSummaries[*].[StackName,StackStatus]'
           
-          # List all stacks to check if our stack exists
+          # Wait for outputs to be available
+          echo "Waiting for stack outputs to be available..."
+          sleep 10
+          
+          # List all available stacks
           echo "Available CloudFormation stacks:"
-          STACKS=$(aws cloudformation list-stacks --query "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName" --output text || echo "Could not list stacks")
-          echo "$STACKS"
+          aws cloudformation list-stacks --query 'StackSummaries[*].[StackName,StackStatus]'
           
-          # First try to print all stack outputs for easier debugging
-          echo "Outputs from all stacks:"
-          for STACK in $STACKS; do
-            if [[ "$STACK" != "CDKToolkit" ]]; then
-              echo "Stack: $STACK"
-              aws cloudformation describe-stacks --stack-name $STACK --query "Stacks[0].Outputs" --output json || echo "No outputs"
-            fi
-          done
+          # Try to get instance IP from InfrastructureStack
+          echo "Attempting to get instance IP from InfrastructureStack..."
+          instance_ip=$(aws cloudformation describe-stacks \
+            --stack-name InfrastructureStack \
+            --query 'Stacks[0].Outputs[?OutputKey==`InstanceIP`].OutputValue' \
+            --output text)
           
-          # Try several possible stack names and output keys
-          IP=""
-          
-          # Try PrepzoBotStack with ExportName
-          if [[ "$STACKS" == *"PrepzoBotStack"* ]]; then
-            echo "Trying PrepzoBotStack with ExportName:"
-            IP=$(aws cloudformation describe-stacks --stack-name PrepzoBotStack --query "Stacks[0].Outputs[?ExportName=='PrepzoBotInstanceIP'].OutputValue" --output text 2>/dev/null || echo "")
-          fi
-          
-          # Try PrepzoBotStack with OutputKey
-          if [[ -z "$IP" && "$STACKS" == *"PrepzoBotStack"* ]]; then
-            echo "Trying PrepzoBotStack with OutputKey:"
-            IP=$(aws cloudformation describe-stacks --stack-name PrepzoBotStack --query "Stacks[0].Outputs[?OutputKey=='InstancePublicIP'].OutputValue" --output text 2>/dev/null || echo "")
-          fi
-          
-          # Try InfrastructureStack with OutputKey
-          if [[ -z "$IP" && "$STACKS" == *"InfrastructureStack"* ]]; then
-            echo "Trying InfrastructureStack with OutputKey:"
-            IP=$(aws cloudformation describe-stacks --stack-name InfrastructureStack --query "Stacks[0].Outputs[?OutputKey=='InstancePublicIP'].OutputValue" --output text 2>/dev/null || echo "")
-          fi
-          
-          # Try all other stacks
-          if [[ -z "$IP" ]]; then
-            echo "Trying all stacks for IP output:"
-            for STACK in $STACKS; do
-              if [[ "$STACK" != "CDKToolkit" ]]; then
-                echo "Checking $STACK for instance IP:"
-                IP=$(aws cloudformation describe-stacks --stack-name $STACK --query "Stacks[0].Outputs[?contains(OutputKey, 'Instance') || contains(OutputKey, 'IP')].OutputValue" --output text 2>/dev/null || echo "")
-                if [[ -n "$IP" ]]; then
-                  echo "Found IP in stack $STACK: $IP"
-                  break
-                fi
-              fi
-            done
-          fi
-          
-          if [ -z "$IP" ]; then
-            echo "⚠️ Could not retrieve instance IP - deployment may have failed."
-            echo "Checking recent CloudFormation events for all stacks:"
-            aws cloudformation describe-stack-events --max-items 10 --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].{Stack:StackName,Resource:LogicalResourceId,Reason:ResourceStatusReason}" --output table || echo "Could not retrieve stack events"
+          if [ -z "$instance_ip" ]; then
+            echo "Could not find InstanceIP in InfrastructureStack outputs"
+            echo "Checking all stack outputs..."
+            aws cloudformation describe-stacks --stack-name InfrastructureStack --query 'Stacks[0].Outputs'
             exit 1
           fi
           
-          echo "Instance IP: $IP"
-          echo "instance_ip=$IP" >> $GITHUB_OUTPUT
+          echo "Found instance IP: $instance_ip"
+          echo "instance_ip=$instance_ip" >> $GITHUB_OUTPUT
+          
+          # Check recent CloudFormation events for any issues
+          echo "Checking recent CloudFormation events..."
+          aws cloudformation describe-stack-events \
+            --stack-name InfrastructureStack \
+            --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`].[LogicalResourceId,ResourceStatusReason]'
       
       - name: Install dependencies for verification
         run: pip install requests
