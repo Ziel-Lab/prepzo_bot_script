@@ -240,6 +240,14 @@ jobs:
           echo "AWS_REGION: $AWS_REGION"
           echo "AWS_ACCOUNT: $(aws sts get-caller-identity --query Account --output text)"
           
+          # List files to debug
+          echo "Checking CDK project structure:"
+          ls -la
+          echo "Main CDK app file (bin/prepzo-bot.ts):"
+          cat bin/prepzo-bot.ts
+          echo "Stack definition (lib/prepzo-bot-stack.ts):"
+          cat lib/prepzo-bot-stack.ts
+          
           # Check if bootstrap was successful
           echo "Checking CDK bootstrap status:"
           CDK_TOOLKIT=$(aws cloudformation describe-stacks --stack-name CDKToolkit --query "Stacks[0].StackStatus" --output text || echo "NOT_FOUND")
@@ -253,8 +261,13 @@ jobs:
             echo "Trying to continue with deployment anyway..."
           fi
           
+          # List synthesized stack to debug
+          echo "Running cdk ls to see what stacks will be deployed:"
+          cdk ls
+          
           # Deploy with verbose output
-          cdk deploy --require-approval never --verbose
+          echo "Deploying stack (this may take several minutes)..."
+          cdk deploy PrepzoBotStack --require-approval never --verbose
           
           # Check if deployment was successful
           if [ $? -ne 0 ]; then
@@ -264,6 +277,9 @@ jobs:
             exit 1
           fi
           echo "CDK deployment completed."
+          echo "Listing all stacks after deployment:"
+          cdk ls
+          aws cloudformation list-stacks --query "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName" --output text
       
       - name: Extract instance IP from CDK outputs
         id: get-ip
@@ -274,16 +290,20 @@ jobs:
           echo "Available CloudFormation stacks:"
           aws cloudformation list-stacks --query "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName" --output text || echo "Could not list stacks"
           
-          # Try to get stack outputs
+          # First try PrepzoBotStack
           echo "Trying to get outputs from PrepzoBotStack:"
-          IP=$(aws cloudformation describe-stacks --stack-name PrepzoBotStack --query "Stacks[0].Outputs[?ExportName=='PrepzoBotInstanceIP'].OutputValue" --output text || echo "")
+          IP=$(aws cloudformation describe-stacks --stack-name PrepzoBotStack --query "Stacks[0].Outputs[?ExportName=='PrepzoBotInstanceIP'].OutputValue" --output text 2>/dev/null || echo "")
+          
+          # If not found, try InfrastructureStack
+          if [ -z "$IP" ]; then
+            echo "PrepzoBotStack not found or has no outputs, trying InfrastructureStack:"
+            IP=$(aws cloudformation describe-stacks --stack-name InfrastructureStack --query "Stacks[0].Outputs[?OutputKey=='InstancePublicIP'].OutputValue" --output text 2>/dev/null || echo "")
+          fi
           
           if [ -z "$IP" ]; then
             echo "⚠️ Could not retrieve instance IP - deployment may have failed."
-            echo "Checking stack status..."
-            aws cloudformation describe-stacks --stack-name PrepzoBotStack || echo "Stack not found"
-            echo "Checking CloudFormation events for errors:"
-            aws cloudformation describe-stack-events --stack-name PrepzoBotStack --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].{Resource:LogicalResourceId, Reason:ResourceStatusReason}" --output table || echo "Could not retrieve stack events"
+            echo "Checking recent CloudFormation events for all stacks:"
+            aws cloudformation describe-stack-events --max-items 10 --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].{Stack:StackName,Resource:LogicalResourceId,Reason:ResourceStatusReason}" --output table || echo "Could not retrieve stack events"
             exit 1
           fi
           
@@ -295,7 +315,14 @@ jobs:
       
       - name: Wait for deployment to complete
         run: |
+          # First check if instance_ip is valid
+          if [ -z "${{ steps.get-ip.outputs.instance_ip }}" ]; then
+            echo "❌ No instance IP was retrieved, deployment failed."
+            exit 1
+          fi
+          
           # Wait for the instance to initialize and start the service (5 minutes max)
+          echo "Instance IP: ${{ steps.get-ip.outputs.instance_ip }}"
           echo "Waiting for deployment to complete and service to start..."
           
           MAX_RETRIES=30
