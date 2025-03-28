@@ -185,20 +185,82 @@ jobs:
           });
           EOL
       
+      - name: Check AWS credentials and permissions
+        run: |
+          echo "==== Checking AWS credentials ===="
+          aws sts get-caller-identity
+          
+          echo "==== Checking AWS region ===="
+          echo "AWS_REGION: ${{ secrets.AWS_REGION }}"
+          
+          echo "==== Checking IAM permissions ===="
+          aws iam get-user || echo "Warning: Could not get IAM user"
+          
+          echo "==== Checking EC2 permissions ===="
+          aws ec2 describe-regions --region ${{ secrets.AWS_REGION }} --query "Regions[0]" || echo "Warning: EC2 permission check failed"
+          
+          echo "==== Checking CloudFormation permissions ===="
+          aws cloudformation list-stacks --region ${{ secrets.AWS_REGION }} --query "StackSummaries[0]" || echo "Warning: CloudFormation permission check failed"
+      
       - name: Bootstrap CDK environment
         working-directory: ./infrastructure
-        run: cdk bootstrap
+        run: cdk bootstrap --verbose
       
       - name: Deploy CDK stack
         working-directory: ./infrastructure
-        run: cdk deploy --require-approval never
+        run: |
+          echo "Starting CDK deployment..."
+          # Print env variables
+          echo "AWS_REGION: $AWS_REGION"
+          echo "AWS_ACCOUNT: $(aws sts get-caller-identity --query Account --output text)"
+          
+          # Check if bootstrap was successful
+          echo "Checking CDK bootstrap status:"
+          CDK_TOOLKIT=$(aws cloudformation describe-stacks --stack-name CDKToolkit --query "Stacks[0].StackStatus" --output text || echo "NOT_FOUND")
+          echo "CDKToolkit stack status: $CDK_TOOLKIT"
+          
+          if [ "$CDK_TOOLKIT" != "CREATE_COMPLETE" ] && [ "$CDK_TOOLKIT" != "UPDATE_COMPLETE" ]; then
+            echo "⚠️ CDK Bootstrap may not have completed successfully."
+            echo "Checking CDKToolkit stack events for errors:"
+            aws cloudformation describe-stack-events --stack-name CDKToolkit --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].{Resource:LogicalResourceId, Reason:ResourceStatusReason}" --output table || echo "Could not retrieve CDKToolkit events"
+            
+            echo "Trying to continue with deployment anyway..."
+          fi
+          
+          # Deploy with verbose output
+          cdk deploy --require-approval never --verbose
+          
+          # Check if deployment was successful
+          if [ $? -ne 0 ]; then
+            echo "CDK deployment failed!"
+            echo "Checking CloudFormation for recently created/failed stacks:"
+            aws cloudformation list-stacks --query "StackSummaries[?CreationTime>='$(date -u -d '1 hour ago' +'%Y-%m-%dT%H:%M:%SZ')']" --output table
+            exit 1
+          fi
+          echo "CDK deployment completed."
       
       - name: Extract instance IP from CDK outputs
         id: get-ip
         run: |
           # Wait a moment for outputs to be available
-          sleep 10
-          IP=$(aws cloudformation describe-stacks --stack-name PrepzoBotStack --query "Stacks[0].Outputs[?ExportName=='PrepzoBotInstanceIP'].OutputValue" --output text)
+          sleep 15
+          # List all stacks to check if our stack exists
+          echo "Available CloudFormation stacks:"
+          aws cloudformation list-stacks --query "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName" --output text || echo "Could not list stacks"
+          
+          # Try to get stack outputs
+          echo "Trying to get outputs from PrepzoBotStack:"
+          IP=$(aws cloudformation describe-stacks --stack-name PrepzoBotStack --query "Stacks[0].Outputs[?ExportName=='PrepzoBotInstanceIP'].OutputValue" --output text || echo "")
+          
+          if [ -z "$IP" ]; then
+            echo "⚠️ Could not retrieve instance IP - deployment may have failed."
+            echo "Checking stack status..."
+            aws cloudformation describe-stacks --stack-name PrepzoBotStack || echo "Stack not found"
+            echo "Checking CloudFormation events for errors:"
+            aws cloudformation describe-stack-events --stack-name PrepzoBotStack --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].{Resource:LogicalResourceId, Reason:ResourceStatusReason}" --output table || echo "Could not retrieve stack events"
+            exit 1
+          fi
+          
           echo "Instance IP: $IP"
           echo "instance_ip=$IP" >> $GITHUB_OUTPUT
       
