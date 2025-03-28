@@ -204,7 +204,33 @@ jobs:
       
       - name: Bootstrap CDK environment
         working-directory: ./infrastructure
-        run: cdk bootstrap --verbose
+        run: |
+          # Try to bootstrap with force flag
+          cdk bootstrap --force --verbose || {
+            echo "Bootstrap failed, checking if CDKToolkit stack exists in failed state..."
+            STACK_STATUS=$(aws cloudformation describe-stacks --stack-name CDKToolkit --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+            
+            if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STACK_STATUS" = "CREATE_FAILED" ]; then
+              echo "Deleting failed CDKToolkit stack..."
+              aws cloudformation delete-stack --stack-name CDKToolkit
+              echo "Waiting for stack deletion to complete..."
+              aws cloudformation wait stack-delete-complete --stack-name CDKToolkit
+              
+              echo "Stack deleted, checking if S3 bucket still exists..."
+              S3_BUCKETS=$(aws s3 ls | grep cdk-hnb659fds-assets || echo "")
+              if [ -n "$S3_BUCKETS" ]; then
+                echo "Warning: S3 buckets still exist. You may need to delete them manually."
+                echo "$S3_BUCKETS"
+              fi
+              
+              echo "Retrying bootstrap..."
+              cdk bootstrap --verbose
+            else
+              echo "CDKToolkit stack status: $STACK_STATUS"
+              echo "Bootstrap failed and stack is not in a state that can be automatically fixed."
+              exit 1
+            fi
+          }
       
       - name: Deploy CDK stack
         working-directory: ./infrastructure
