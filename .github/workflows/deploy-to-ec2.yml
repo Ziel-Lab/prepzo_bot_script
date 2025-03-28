@@ -280,29 +280,27 @@ jobs:
             npx tsc bin/infrastructure.ts --noEmit
             if [ $? -ne 0 ]; then
               echo "TypeScript validation failed. Using fallback approach."
-              # Completely replace the file with a known good structure
-              cat > bin/infrastructure.ts << 'EOF'
-#!/usr/bin/env node
-import 'source-map-support/register';
-import * as cdk from 'aws-cdk-lib';
-import { InfrastructureStack } from '../lib/infrastructure-stack';
-import { PrepzoBotStack } from '../lib/prepzo-bot-stack';
-
-const app = new cdk.App();
-new InfrastructureStack(app, 'InfrastructureStack', {
-  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: 'eu-north-1' },
-});
-
-// Add PrepzoBotStack
-new PrepzoBotStack(app, 'PrepzoBotStack', { 
-  env: { 
-    account: process.env.CDK_DEFAULT_ACCOUNT, 
-    region: 'eu-north-1' 
-  }
-});
-
-app.synth();
-EOF
+              # Completely replace the file with a known good structure using echo commands instead of heredoc
+              echo '#!/usr/bin/env node' > bin/infrastructure.ts
+              echo 'import "source-map-support/register";' >> bin/infrastructure.ts
+              echo 'import * as cdk from "aws-cdk-lib";' >> bin/infrastructure.ts
+              echo 'import { InfrastructureStack } from "../lib/infrastructure-stack";' >> bin/infrastructure.ts
+              echo 'import { PrepzoBotStack } from "../lib/prepzo-bot-stack";' >> bin/infrastructure.ts
+              echo '' >> bin/infrastructure.ts
+              echo 'const app = new cdk.App();' >> bin/infrastructure.ts
+              echo 'new InfrastructureStack(app, "InfrastructureStack", {' >> bin/infrastructure.ts
+              echo '  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: "eu-north-1" },' >> bin/infrastructure.ts
+              echo '});' >> bin/infrastructure.ts
+              echo '' >> bin/infrastructure.ts
+              echo '// Add PrepzoBotStack' >> bin/infrastructure.ts
+              echo 'new PrepzoBotStack(app, "PrepzoBotStack", {' >> bin/infrastructure.ts
+              echo '  env: {' >> bin/infrastructure.ts
+              echo '    account: process.env.CDK_DEFAULT_ACCOUNT,' >> bin/infrastructure.ts
+              echo '    region: "eu-north-1"' >> bin/infrastructure.ts
+              echo '  }' >> bin/infrastructure.ts
+              echo '});' >> bin/infrastructure.ts
+              echo '' >> bin/infrastructure.ts
+              echo 'app.synth();' >> bin/infrastructure.ts
             fi
             
             echo "Modified infrastructure.ts:"
