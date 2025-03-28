@@ -21,9 +21,18 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          aws-access-key-id: ${{ secrets.GITHUB_DEPLOYMENT_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.GITHUB_DEPLOYMENT_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: 'eu-north-1'
+          role-session-name: 'GitHubActionsSession'
+      
+      # Alternative credential setup using standard AWS credential secret names
+      # Uncomment this and comment out the OIDC method above if you prefer using access keys
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v2
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: 'eu-north-1'
       
       - name: Set up Node.js
         uses: actions/setup-node@v3
