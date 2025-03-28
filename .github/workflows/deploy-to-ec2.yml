@@ -56,7 +56,8 @@ jobs:
         working-directory: ./infrastructure
         run: |
           npm install aws-cdk-lib constructs
-          npm install @aws-cdk/aws-ec2 @aws-cdk/aws-iam
+          # Fix: The v2 CDK imports moved into aws-cdk-lib
+          npm install typescript aws-cdk-lib @types/node
       
       - name: Create CDK stack
         working-directory: ./infrastructure
@@ -221,7 +222,7 @@ jobs:
           echo '      securityGroup,' >> lib/prepzo-bot-stack.ts
           echo '      role,' >> lib/prepzo-bot-stack.ts
           echo '      userData,' >> lib/prepzo-bot-stack.ts
-          echo '      keyName: "${{ secrets.EC2_KEY_NAME }}",' >> lib/prepzo-bot-stack.ts
+          echo '      keyName: process.env.EC2_KEY_NAME || undefined,' >> lib/prepzo-bot-stack.ts
           echo '    });' >> lib/prepzo-bot-stack.ts
           echo '' >> lib/prepzo-bot-stack.ts
           echo '    // Output the instance public IP' >> lib/prepzo-bot-stack.ts
@@ -246,6 +247,7 @@ jobs:
           echo '    region: "eu-north-1"' >> bin/prepzo-bot.ts
           echo '  },' >> bin/prepzo-bot.ts
           echo '});' >> bin/prepzo-bot.ts
+          echo 'app.synth();' >> bin/prepzo-bot.ts
 
           # Keep the original entry point but make sure it uses our stack too
           if [ -f "bin/infrastructure.ts" ]; then
@@ -382,6 +384,12 @@ EOF
           echo "Default app.ts content:"
           cat lib/infrastructure-stack.ts || echo "File not found"
           
+          # Add app.synth() to the PrepzoBotStack file if it doesn't exist
+          if ! grep -q "app.synth()" bin/prepzo-bot.ts; then
+            echo "Adding app.synth() to PrepzoBotStack file"
+            echo 'app.synth();' >> bin/prepzo-bot.ts
+          fi
+          
           # Check CDK bootstrap status
           echo "Checking CDK bootstrap status..."
           aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].StackStatus' || echo "CDKToolkit stack not found"
@@ -467,23 +475,30 @@ EOF
             SSH_AVAILABLE=false
           fi
           
-          MAX_RETRIES=60  # Increased from 30 to 60 (10 minutes total)
+          MAX_RETRIES=60  # 10 minutes total
           RETRY_INTERVAL=10
           
           for i in $(seq 1 $MAX_RETRIES); do
             echo "Attempt $i of $MAX_RETRIES..."
             
-            # Try to access the health endpoint
-            echo "Checking health endpoint: http://$INSTANCE_IP/health"
-            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://$INSTANCE_IP/health || echo "error")
+            # Try to access the health endpoint on both HTTP and HTTPS
+            echo "Checking health endpoint (HTTP): http://$INSTANCE_IP/health"
+            HTTP_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://$INSTANCE_IP/health || echo "error")
             
-            if [ "$RESPONSE" == "200" ]; then
+            echo "Checking health endpoint (HTTPS): https://$INSTANCE_IP/health"
+            HTTPS_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --insecure https://$INSTANCE_IP/health || echo "error")
+            
+            # Also try port 8080 directly
+            echo "Checking health endpoint on port 8080: http://$INSTANCE_IP:8080/health"
+            PORT_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://$INSTANCE_IP:8080/health || echo "error")
+            
+            if [ "$HTTP_RESPONSE" == "200" ] || [ "$HTTPS_RESPONSE" == "200" ] || [ "$PORT_RESPONSE" == "200" ]; then
               echo "✅ Service is up and running!"
               echo "Deployment successful."
               exit 0
             fi
             
-            echo "Service not ready yet (response: $RESPONSE), waiting $RETRY_INTERVAL seconds..."
+            echo "Service not ready yet (HTTP: $HTTP_RESPONSE, HTTPS: $HTTPS_RESPONSE, Port 8080: $PORT_RESPONSE), waiting $RETRY_INTERVAL seconds..."
             
             # Every 5 attempts (50 seconds), try to get more debugging info
             if [ $((i % 5)) -eq 0 ]; then
