@@ -1708,7 +1708,7 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
                 await timeout_task
             except asyncio.CancelledError:
                 pass
-            logger.info("Timeout task cleaned up!")
+            logger.info("Timeout task cleaned up")
 
 def prewarm(proc: JobProcess):
     """

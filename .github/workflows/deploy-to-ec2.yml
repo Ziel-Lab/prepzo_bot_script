@@ -98,13 +98,12 @@ jobs:
           echo '      allowAllOutbound: true,' >> lib/prepzo-bot-stack.ts
           echo '    });' >> lib/prepzo-bot-stack.ts
           echo '' >> lib/prepzo-bot-stack.ts
-          echo '    // Add inbound rules - explicitly allow all ports needed' >> lib/prepzo-bot-stack.ts
+          echo '    // Add inbound rules' >> lib/prepzo-bot-stack.ts
           echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), "Allow SSH access from anywhere");' >> lib/prepzo-bot-stack.ts
           echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), "Allow HTTP access from anywhere");' >> lib/prepzo-bot-stack.ts
           echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), "Allow HTTPS access from anywhere");' >> lib/prepzo-bot-stack.ts
           echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(3000), "Allow access on port 3000");' >> lib/prepzo-bot-stack.ts
           echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(8080), "Allow access to health check endpoint");' >> lib/prepzo-bot-stack.ts
-          echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.allTraffic(), "Allow all traffic during testing");' >> lib/prepzo-bot-stack.ts
           echo '' >> lib/prepzo-bot-stack.ts
           echo '    // Create a role for the EC2 instance' >> lib/prepzo-bot-stack.ts
           echo '    const role = new iam.Role(this, "PrepzoBotRole", {' >> lib/prepzo-bot-stack.ts
@@ -117,86 +116,44 @@ jobs:
           echo '    // User data script for EC2 instance' >> lib/prepzo-bot-stack.ts
           echo '    const userData = ec2.UserData.forLinux();' >> lib/prepzo-bot-stack.ts
           echo '    userData.addCommands(' >> lib/prepzo-bot-stack.ts
-          echo '      "#!/bin/bash",' >> lib/prepzo-bot-stack.ts
-          echo '      "set -e",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Update system and install dependencies",' >> lib/prepzo-bot-stack.ts
           echo '      "yum update -y",' >> lib/prepzo-bot-stack.ts
-          echo '      "yum install -y git python3 python3-pip python3-venv jq htop tcpdump nc",' >> lib/prepzo-bot-stack.ts
+          echo '      "yum install -y git python3 python3-pip python3-venv nc curl systemd",' >> lib/prepzo-bot-stack.ts
           echo '      "cd /home/ec2-user",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Setup simple backup health check using netcat",' >> lib/prepzo-bot-stack.ts
-          echo '      "cat > /home/ec2-user/simple_health.sh << \\"EOF\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "#!/bin/bash",' >> lib/prepzo-bot-stack.ts
-          echo '      "while true; do",' >> lib/prepzo-bot-stack.ts
-          echo '      "  echo -e \\"HTTP/1.1 200 OK\\nContent-Type: application/json\\n\\n{\\\\\\"status\\\\\\":\\\\\\"ok\\\\\\"}\\" | nc -l -p 8080",' >> lib/prepzo-bot-stack.ts
-          echo '      "  sleep 0.1",' >> lib/prepzo-bot-stack.ts
-          echo '      "done",' >> lib/prepzo-bot-stack.ts
-          echo '      "EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "chmod +x /home/ec2-user/simple_health.sh",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Create systemd service for backup health check",' >> lib/prepzo-bot-stack.ts
-          echo '      "cat > /etc/systemd/system/simple-health.service << \\"EOF\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "[Unit]",' >> lib/prepzo-bot-stack.ts
-          echo '      "Description=Simple Health Check Service",' >> lib/prepzo-bot-stack.ts
-          echo '      "After=network.target",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "[Service]",' >> lib/prepzo-bot-stack.ts
-          echo '      "User=ec2-user",' >> lib/prepzo-bot-stack.ts
-          echo '      "ExecStart=/home/ec2-user/simple_health.sh",' >> lib/prepzo-bot-stack.ts
-          echo '      "Restart=always",' >> lib/prepzo-bot-stack.ts
-          echo '      "RestartSec=10",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "[Install]",' >> lib/prepzo-bot-stack.ts
-          echo '      "WantedBy=multi-user.target",' >> lib/prepzo-bot-stack.ts
-          echo '      "EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "systemctl enable simple-health",' >> lib/prepzo-bot-stack.ts
-          echo '      "systemctl start simple-health",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Clone the repository",' >> lib/prepzo-bot-stack.ts
           echo '      "git clone https://github.com/${{ github.repository }}.git prepzo_bot",' >> lib/prepzo-bot-stack.ts
           echo '      "chown -R ec2-user:ec2-user prepzo_bot",' >> lib/prepzo-bot-stack.ts
           echo '      "cd prepzo_bot",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Setup Python environment",' >> lib/prepzo-bot-stack.ts
           echo '      "python3 -m venv venv",' >> lib/prepzo-bot-stack.ts
           echo '      "source venv/bin/activate",' >> lib/prepzo-bot-stack.ts
-          echo '      "pip install --upgrade pip",' >> lib/prepzo-bot-stack.ts
-          echo '      "pip install -r requirements.txt",' >> lib/prepzo-bot-stack.ts
+          echo '      "pip install -r requirements.txt || { echo \"Error installing requirements\"; cat requirements.txt; exit 1; }",' >> lib/prepzo-bot-stack.ts
           echo '      "pip install requests paramiko flask",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Create environment variables",' >> lib/prepzo-bot-stack.ts
           echo '      "mkdir -p /home/ec2-user/.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"SUPABASE_URL=${{ secrets.SUPABASE_URL }}\\" > /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}\\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}\\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"DEEPGRAM_API_KEY=${{ secrets.DEEPGRAM_API_KEY }}\\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"LIVEKIT_URL=${{ secrets.LIVEKIT_URL }}\\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"LIVEKIT_API_KEY=${{ secrets.LIVEKIT_API_KEY }}\\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"CARTESIA_API_KEY=${{ secrets.CARTESIA_API_KEY }}\\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"ELEVENLABS_API_KEY=${{ secrets.ELEVENLABS_API_KEY }}\\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"HEALTH_CHECK_PORT=8080\\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"ENVIRONMENT=production\\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"GIT_COMMIT=${{ github.sha }}\\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Create a simple health check server script if it doesnt exist in main.py",' >> lib/prepzo-bot-stack.ts
-          echo '      "if ! grep -q \\"health\\" main.py; then",' >> lib/prepzo-bot-stack.ts
-          echo '      "  cat > health_server.py << \\"EOF\\"",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"SUPABASE_URL=${{ secrets.SUPABASE_URL }}\" > /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"DEEPGRAM_API_KEY=${{ secrets.DEEPGRAM_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"LIVEKIT_URL=${{ secrets.LIVEKIT_URL }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"LIVEKIT_API_KEY=${{ secrets.LIVEKIT_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"CARTESIA_API_KEY=${{ secrets.CARTESIA_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"ELEVENLABS_API_KEY=${{ secrets.ELEVENLABS_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"HEALTH_CHECK_PORT=8080\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"ENVIRONMENT=production\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"GIT_COMMIT=${{ github.sha }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "# Create simple health check endpoint in case the app takes time to start",' >> lib/prepzo-bot-stack.ts
+          echo '      "cat > /home/ec2-user/prepzo_bot/health_server.py << EOF",' >> lib/prepzo-bot-stack.ts
+          echo '      "import flask",' >> lib/prepzo-bot-stack.ts
           echo '      "import os",' >> lib/prepzo-bot-stack.ts
-          echo '      "import json",' >> lib/prepzo-bot-stack.ts
-          echo '      "from flask import Flask",' >> lib/prepzo-bot-stack.ts
-          echo '      "app = Flask(__name__)",' >> lib/prepzo-bot-stack.ts
-          echo '      "@app.route(\\"/health\\")",' >> lib/prepzo-bot-stack.ts
+          echo '      "app = flask.Flask(__name__)",' >> lib/prepzo-bot-stack.ts
+          echo '      "",' >> lib/prepzo-bot-stack.ts
+          echo '      "@app.route(\'/health\')",' >> lib/prepzo-bot-stack.ts
           echo '      "def health():",' >> lib/prepzo-bot-stack.ts
-          echo '      "    return json.dumps({\\"\\"status\\"\\":\\"\\"ok\\"\\"})}",' >> lib/prepzo-bot-stack.ts
-          echo '      "if __name__ == \\"__main__\\":",' >> lib/prepzo-bot-stack.ts
-          echo '      "    port = int(os.environ.get(\\"HEALTH_CHECK_PORT\\", 8080))",' >> lib/prepzo-bot-stack.ts
-          echo '      "    app.run(host=\\"0.0.0.0\\", port=port)",' >> lib/prepzo-bot-stack.ts
+          echo '      "    return {\'status\': \'ok\', \'service\': \'prepzo-bot\'}",' >> lib/prepzo-bot-stack.ts
+          echo '      "",' >> lib/prepzo-bot-stack.ts
+          echo '      "if __name__ == \'__main__\':",' >> lib/prepzo-bot-stack.ts
+          echo '      "    app.run(host=\'0.0.0.0\', port=8080)",' >> lib/prepzo-bot-stack.ts
           echo '      "EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "  chmod +x health_server.py",' >> lib/prepzo-bot-stack.ts
-          echo '      "  # Create a systemd service for the health check",' >> lib/prepzo-bot-stack.ts
-          echo '      "  cat > /etc/systemd/system/health-check.service << \\"EOF\\"",' >> lib/prepzo-bot-stack.ts
+          echo '      "cat > /etc/systemd/system/prepzo-health.service << EOF",' >> lib/prepzo-bot-stack.ts
           echo '      "[Unit]",' >> lib/prepzo-bot-stack.ts
-          echo '      "Description=Health Check Service",' >> lib/prepzo-bot-stack.ts
+          echo '      "Description=Prepzo Health Check Service",' >> lib/prepzo-bot-stack.ts
           echo '      "After=network.target",' >> lib/prepzo-bot-stack.ts
           echo '      "",' >> lib/prepzo-bot-stack.ts
           echo '      "[Service]",' >> lib/prepzo-bot-stack.ts
@@ -205,17 +162,12 @@ jobs:
           echo '      "EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
           echo '      "ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python health_server.py",' >> lib/prepzo-bot-stack.ts
           echo '      "Restart=always",' >> lib/prepzo-bot-stack.ts
-          echo '      "RestartSec=10",' >> lib/prepzo-bot-stack.ts
+          echo '      "RestartSec=5",' >> lib/prepzo-bot-stack.ts
           echo '      "",' >> lib/prepzo-bot-stack.ts
           echo '      "[Install]",' >> lib/prepzo-bot-stack.ts
           echo '      "WantedBy=multi-user.target",' >> lib/prepzo-bot-stack.ts
           echo '      "EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "  systemctl enable health-check",' >> lib/prepzo-bot-stack.ts
-          echo '      "  systemctl start health-check",' >> lib/prepzo-bot-stack.ts
-          echo '      "fi",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Create systemd service for the main application",' >> lib/prepzo-bot-stack.ts
-          echo '      "cat > /etc/systemd/system/prepzo-bot.service << \\"EOF\\"",' >> lib/prepzo-bot-stack.ts
+          echo '      "cat > /etc/systemd/system/prepzo-bot.service << EOF",' >> lib/prepzo-bot-stack.ts
           echo '      "[Unit]",' >> lib/prepzo-bot-stack.ts
           echo '      "Description=Prepzo Bot Service",' >> lib/prepzo-bot-stack.ts
           echo '      "After=network.target",' >> lib/prepzo-bot-stack.ts
@@ -228,63 +180,18 @@ jobs:
           echo '      "Restart=always",' >> lib/prepzo-bot-stack.ts
           echo '      "RestartSec=10",' >> lib/prepzo-bot-stack.ts
           echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Configure port forwarding",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Forward port 80 to 8080 for the health check",' >> lib/prepzo-bot-stack.ts
-          echo '      "iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080",' >> lib/prepzo-bot-stack.ts
-          echo '      "iptables-save > /etc/iptables.rules",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"net.ipv4.ip_forward=1\\" >> /etc/sysctl.conf",' >> lib/prepzo-bot-stack.ts
-          echo '      "sysctl -p",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Create a script to persist iptables rules after reboot",' >> lib/prepzo-bot-stack.ts
-          echo '      "mkdir -p /etc/network/if-pre-up.d",' >> lib/prepzo-bot-stack.ts
-          echo '      "cat > /etc/network/if-pre-up.d/iptables << \\"EOF\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "#!/bin/sh",' >> lib/prepzo-bot-stack.ts
-          echo '      "iptables-restore < /etc/iptables.rules",' >> lib/prepzo-bot-stack.ts
-          echo '      "exit 0",' >> lib/prepzo-bot-stack.ts
+          echo '      "[Install]",' >> lib/prepzo-bot-stack.ts
+          echo '      "WantedBy=multi-user.target",' >> lib/prepzo-bot-stack.ts
           echo '      "EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "chmod +x /etc/network/if-pre-up.d/iptables",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Create rc.local for Amazon Linux 2023 to ensure iptables persist",' >> lib/prepzo-bot-stack.ts
-          echo '      "cat > /etc/rc.local << \\"EOF\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "#!/bin/bash",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Load saved iptables rules",' >> lib/prepzo-bot-stack.ts
-          echo '      "iptables-restore < /etc/iptables.rules",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Ensure forwarding from port 80 to 8080",' >> lib/prepzo-bot-stack.ts
-          echo '      "iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080",' >> lib/prepzo-bot-stack.ts
-          echo '      "exit 0",' >> lib/prepzo-bot-stack.ts
-          echo '      "EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "chmod +x /etc/rc.local",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Create a simple diagnostics script",' >> lib/prepzo-bot-stack.ts
-          echo '      "cat > /home/ec2-user/diagnose.sh << \\"EOF\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "#!/bin/bash",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"System status:\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "uptime",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"\\nDisk space:\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "df -h",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"\\nMemory usage:\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "free -m",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"\\nService status:\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "systemctl status prepzo-bot --no-pager",' >> lib/prepzo-bot-stack.ts
-          echo '      "systemctl status health-check --no-pager",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"\\nNetworking:\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "netstat -tulpn | grep -E \'(8080|80)\'",' >> lib/prepzo-bot-stack.ts
-          echo '      "curl -s http://localhost:8080/health || echo \\"Health check failed\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "iptables -t nat -L -n -v",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"\\nLogs:\\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "journalctl -u prepzo-bot -n 20 --no-pager",' >> lib/prepzo-bot-stack.ts
-          echo '      "EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "chmod +x /home/ec2-user/diagnose.sh",' >> lib/prepzo-bot-stack.ts
-          echo '      "chown ec2-user:ec2-user /home/ec2-user/diagnose.sh",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Enable and start services",' >> lib/prepzo-bot-stack.ts
           echo '      "systemctl daemon-reload",' >> lib/prepzo-bot-stack.ts
+          echo '      "systemctl enable prepzo-health",' >> lib/prepzo-bot-stack.ts
+          echo '      "systemctl start prepzo-health",' >> lib/prepzo-bot-stack.ts
           echo '      "systemctl enable prepzo-bot",' >> lib/prepzo-bot-stack.ts
-          echo '      "systemctl start prepzo-bot",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Create a marker file to indicate setup is complete",' >> lib/prepzo-bot-stack.ts
-          echo '      "touch /var/tmp/setup_complete",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \\"Setup completed successfully at $(date)\\""' >> lib/prepzo-bot-stack.ts
+          echo '      "systemctl start prepzo-bot || echo \"Main service failed to start, but health endpoint should be running\"",' >> lib/prepzo-bot-stack.ts
+          echo '      "iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"net.ipv4.ip_forward=1\" >> /etc/sysctl.conf",' >> lib/prepzo-bot-stack.ts
+          echo '      "sysctl -p",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"Deployment complete, health check available at http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)/health\""' >> lib/prepzo-bot-stack.ts
           echo '    );' >> lib/prepzo-bot-stack.ts
           echo '' >> lib/prepzo-bot-stack.ts
           echo '    // EC2 instance' >> lib/prepzo-bot-stack.ts
@@ -453,155 +360,71 @@ jobs:
             exit 1
           fi
           
-          # Create SSH key file
-          echo "Setting up SSH key for connecting to instance..."
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_PRIVATE_KEY }}" > ~/.ssh/ec2_key
-          chmod 600 ~/.ssh/ec2_key
-          
-          # Wait for the instance to initialize and start the service (15 minutes max)
+          # Wait for the instance to initialize and start the service (10 minutes max)
           INSTANCE_IP="${{ steps.get-ip.outputs.instance_ip }}"
           echo "Instance IP: $INSTANCE_IP"
           echo "Waiting for deployment to complete and service to start..."
           
-          # First wait for SSH to be available (2 minutes max)
-          echo "Waiting for SSH to become available..."
-          SSH_MAX_RETRIES=12
-          for i in $(seq 1 $SSH_MAX_RETRIES); do
-            echo "SSH connection attempt $i of $SSH_MAX_RETRIES..."
-            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/ec2_key ec2-user@$INSTANCE_IP "echo SSH connection successful"; then
-              echo "✅ SSH connection established!"
-              break
-            fi
-            
-            if [ $i -eq $SSH_MAX_RETRIES ]; then
-              echo "⚠️ Could not establish SSH connection after 2 minutes."
-              echo "Instance might still be initializing. Will continue with health checks."
-            fi
-            
-            echo "Waiting for SSH to become available... (5 seconds)"
-            sleep 5
-          done
+          # Add SSH key for debugging if provided
+          if [ -n "${{ secrets.EC2_SSH_KEY }}" ]; then
+            echo "Setting up SSH access for debugging..."
+            mkdir -p ~/.ssh
+            echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key.pem
+            chmod 600 ~/.ssh/ec2_key.pem
+            SSH_AVAILABLE=true
+          else
+            SSH_AVAILABLE=false
+          fi
           
-          # Now wait for health check to respond
-          MAX_RETRIES=60
-          RETRY_INTERVAL=15
+          MAX_RETRIES=60  # Increased from 30 to 60 (10 minutes total)
+          RETRY_INTERVAL=10
           
           for i in $(seq 1 $MAX_RETRIES); do
-            echo "Attempt $i of $MAX_RETRIES to connect to health endpoint..."
+            echo "Attempt $i of $MAX_RETRIES..."
             
-            # Try both ports for the health check
-            HTTP_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://$INSTANCE_IP/health || echo "error")
-            HEALTH_PORT_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://$INSTANCE_IP:8080/health || echo "error")
+            # Try to access the health endpoint
+            echo "Checking health endpoint: http://$INSTANCE_IP/health"
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://$INSTANCE_IP/health || echo "error")
             
-            if [ "$HTTP_RESPONSE" == "200" ] || [ "$HEALTH_PORT_RESPONSE" == "200" ]; then
-              echo "✅ Health check endpoint is responding! Service is running."
+            if [ "$RESPONSE" == "200" ]; then
+              echo "✅ Service is up and running!"
               echo "Deployment successful."
-              
-              # Try to get actual health check content
-              echo "Health check response content:"
-              curl -s http://$INSTANCE_IP/health || curl -s http://$INSTANCE_IP:8080/health || echo "Could not get health check content"
-              
               exit 0
             fi
             
-            echo "Service not ready yet. HTTP response: $HTTP_RESPONSE, Port 8080 response: $HEALTH_PORT_RESPONSE"
+            echo "Service not ready yet (response: $RESPONSE), waiting $RETRY_INTERVAL seconds..."
             
-            # Try to run diagnostics every 5 attempts
+            # Every 5 attempts (50 seconds), try to get more debugging info
             if [ $((i % 5)) -eq 0 ]; then
-              echo "Running diagnostics on attempt $i..."
-              ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/ec2_key ec2-user@$INSTANCE_IP 'bash -s' << 'EOF' || echo "Could not connect via SSH for diagnostics"
-              echo "==== Instance Initialization Status ===="
-              if [ -f /var/tmp/setup_complete ]; then
-                echo "✅ Setup script has completed"
-              else
-                echo "⚠️ Setup script has not completed yet"
-                echo "Checking cloud-init status:"
-                sudo cat /var/log/cloud-init-output.log | tail -n 50 || echo "Could not read cloud-init log"
+              echo "------- Debugging Information -------"
+              # Try to check port 80 connectivity
+              echo "Checking if port 80 is open..."
+              nc -zv $INSTANCE_IP 80 -w 5 || echo "Port 80 connection failed"
+              
+              # Try port 8080 directly
+              echo "Checking if port 8080 is open..."
+              nc -zv $INSTANCE_IP 8080 -w 5 || echo "Port 8080 connection failed"
+              
+              # If SSH is available, try to get logs from the instance
+              if [ "$SSH_AVAILABLE" = true ]; then
+                echo "Checking service status via SSH..."
+                ssh -o StrictHostKeyChecking=no -i ~/.ssh/ec2_key.pem ec2-user@$INSTANCE_IP "sudo systemctl status prepzo-bot" || echo "Failed to get service status"
+                
+                echo "Checking service logs..."
+                ssh -o StrictHostKeyChecking=no -i ~/.ssh/ec2_key.pem ec2-user@$INSTANCE_IP "sudo journalctl -u prepzo-bot --no-pager -n 50" || echo "Failed to get service logs"
+                
+                echo "Checking if health endpoint is running on the instance..."
+                ssh -o StrictHostKeyChecking=no -i ~/.ssh/ec2_key.pem ec2-user@$INSTANCE_IP "curl -v localhost:8080/health" || echo "Health endpoint not accessible locally"
               fi
-              
-              echo "==== Service Status ===="
-              sudo systemctl status health-check || true
-              sudo systemctl status prepzo-bot || true
-              
-              echo "==== Network Configuration ===="
-              sudo iptables -t nat -L -n -v
-              sudo netstat -tulpn | grep -E '(8080|80)'
-              
-              echo "==== Checking Health Endpoint Locally ===="
-              curl -v localhost:8080/health 2>&1 || echo "Could not connect to local health endpoint"
-              
-              echo "==== Service Logs ===="
-              sudo journalctl -u health-check -n 20 --no-pager || true
-              
-              echo "==== User Data Script Execution Status ===="
-              ps aux | grep python || true
-              ls -la /home/ec2-user/prepzo_bot/
-EOF
+              echo "------------------------------------"
             fi
             
-            echo "Waiting $RETRY_INTERVAL seconds before next attempt..."
             sleep $RETRY_INTERVAL
           done
           
-          echo "❌ Deployment verification timed out after 15 minutes"
-          echo "Running final diagnostics and collecting logs..."
-          
-          # Final diagnostics - gather as much info as possible
-          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/ec2_key ec2-user@$INSTANCE_IP 'bash -s' << EOSSH || echo "Could not connect via SSH for final diagnostics"
-echo "==== FINAL DIAGNOSTICS REPORT ===="
-echo "System uptime: $(uptime)"
-echo "Memory usage:"
-free -h
-
-echo "==== CLOUD INIT LOGS ===="
-sudo cat /var/log/cloud-init-output.log | tail -n 100 || echo "Could not read cloud-init log"
-
-echo "==== INSTANCE SETUP STATUS ===="
-if [ -f /var/tmp/setup_complete ]; then
-  echo "✅ Setup script completed at: $(stat -c %y /var/tmp/setup_complete)"
-else
-  echo "⚠️ Setup script has not completed yet"
-fi
-
-echo "==== HEALTH CHECK STATUS ===="
-if [ -f /home/ec2-user/prepzo_bot/health_server.py ]; then
-  echo "✅ Health check server file exists"
-  cat /home/ec2-user/prepzo_bot/health_server.py
-else
-  echo "⚠️ Health check server file not found"
-fi
-
-echo "==== MANUAL HEALTH CHECK SETUP ===="
-echo "Attempting to manually start health check..."
-cd /home/ec2-user/prepzo_bot || exit 1
-source venv/bin/activate || echo "Could not activate venv"
-
-# Create a temporary health check file if it doesn't exist
-if [ ! -f health_server.py ]; then
-  echo "Creating temporary health check server..."
-  cat > temp_health.py << EOF
-import os
-from flask import Flask
-app = Flask(__name__)
-@app.route("/health")
-def health():
-    return '{"status":"ok"}'
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
-EOF
-  
-  python temp_health.py &
-  echo "Started temporary health server, waiting 5 seconds..."
-  sleep 5
-  curl -v localhost:8080/health || echo "Still cannot connect to health endpoint"
-fi
-EOSSH
-          
-          echo "Deployment might still be in progress. You can check the status later by SSH into the instance."
-          echo "Instance IP: $INSTANCE_IP"
-          echo "SSH command: ssh -i your_key.pem ec2-user@$INSTANCE_IP"
-          echo "After SSH, run: sudo bash /home/ec2-user/diagnose.sh"
+          echo "❌ Deployment verification timed out after 10 minutes"
+          echo "You may need to check the instance manually at: $INSTANCE_IP"
+          echo "Health endpoint should be available at: http://$INSTANCE_IP/health"
           exit 1
       
       - name: Notify deployment status
@@ -611,12 +434,6 @@ EOSSH
             echo "✅ Deployment completed successfully!"
             echo "Instance IP: ${{ steps.get-ip.outputs.instance_ip }}"
             echo "Health check available at: http://${{ steps.get-ip.outputs.instance_ip }}/health"
-            echo "SSH access: ssh ec2-user@${{ steps.get-ip.outputs.instance_ip }}"
-            echo "Diagnostic command: sudo bash /home/ec2-user/diagnose.sh"
           else
-            echo "❌ Deployment failed or verification timed out!"
-            echo "If the instance was created, you can still check it manually:"
-            echo "Instance IP: ${{ steps.get-ip.outputs.instance_ip }}"
-            echo "Try connecting: ssh ec2-user@${{ steps.get-ip.outputs.instance_ip }}"
-            echo "Then run: sudo bash /home/ec2-user/diagnose.sh"
+            echo "❌ Deployment failed!"
           fi 
