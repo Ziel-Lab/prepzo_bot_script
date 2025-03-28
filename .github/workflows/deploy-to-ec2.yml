@@ -21,9 +21,9 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.GITHUB_DEPLOYMENT_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.GITHUB_DEPLOYMENT_SECRET_ACCESS_KEY }}
+          aws-region: 'eu-north-1'
       
       - name: Set up Node.js
         uses: actions/setup-node@v3
@@ -243,7 +243,7 @@ jobs:
           echo 'new PrepzoBotStack(app, "PrepzoBotStack", {' >> bin/prepzo-bot.ts
           echo '  env: {' >> bin/prepzo-bot.ts
           echo '    account: process.env.CDK_DEFAULT_ACCOUNT,' >> bin/prepzo-bot.ts
-          echo '    region: process.env.CDK_DEFAULT_REGION' >> bin/prepzo-bot.ts
+          echo '    region: "eu-north-1"' >> bin/prepzo-bot.ts
           echo '  },' >> bin/prepzo-bot.ts
           echo '});' >> bin/prepzo-bot.ts
 
@@ -265,13 +265,13 @@ jobs:
             if grep -q "app\.synth\(\)" bin/infrastructure.ts; then
               # Use awk to insert our stack before app.synth()
               TEMP_FILE=$(mktemp)
-              awk '/app\.synth\(\)/ { print "// Add PrepzoBotStack\nnew PrepzoBotStack(app, \"PrepzoBotStack\", { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION } });\n"; } { print; }' bin/infrastructure.ts > "$TEMP_FILE"
+              awk '/app\.synth\(\)/ { print "// Add PrepzoBotStack\nnew PrepzoBotStack(app, \"PrepzoBotStack\", { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: \"eu-north-1\" } });\n"; } { print; }' bin/infrastructure.ts > "$TEMP_FILE"
               mv "$TEMP_FILE" bin/infrastructure.ts
             else
               # If no app.synth(), add our stack at the end
               echo "" >> bin/infrastructure.ts
               echo "// Add PrepzoBotStack" >> bin/infrastructure.ts
-              echo "new PrepzoBotStack(app, 'PrepzoBotStack', { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION } });" >> bin/infrastructure.ts
+              echo "new PrepzoBotStack(app, 'PrepzoBotStack', { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: 'eu-north-1' } });" >> bin/infrastructure.ts
             fi
             
             # Verify the file is valid TypeScript
@@ -288,14 +288,14 @@ import { PrepzoBotStack } from '../lib/prepzo-bot-stack';
 
 const app = new cdk.App();
 new InfrastructureStack(app, 'InfrastructureStack', {
-  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: 'eu-north-1' },
 });
 
 // Add PrepzoBotStack
 new PrepzoBotStack(app, 'PrepzoBotStack', { 
   env: { 
     account: process.env.CDK_DEFAULT_ACCOUNT, 
-    region: process.env.CDK_DEFAULT_REGION 
+    region: 'eu-north-1' 
   }
 });
 
@@ -317,16 +317,16 @@ EOF
           aws sts get-caller-identity
           
           echo "==== Checking AWS region ===="
-          echo "AWS_REGION: ${{ secrets.AWS_REGION }}"
+          echo "AWS_REGION: eu-north-1"
           
           echo "==== Checking IAM permissions ===="
           aws iam get-user || echo "Warning: Could not get IAM user"
           
           echo "==== Checking EC2 permissions ===="
-          aws ec2 describe-regions --region ${{ secrets.AWS_REGION }} --query "Regions[0]" || echo "Warning: EC2 permission check failed"
+          aws ec2 describe-regions --region eu-north-1 --query "Regions[0]" || echo "Warning: EC2 permission check failed"
           
           echo "==== Checking CloudFormation permissions ===="
-          aws cloudformation list-stacks --region ${{ secrets.AWS_REGION }} --query "StackSummaries[0]" || echo "Warning: CloudFormation permission check failed"
+          aws cloudformation list-stacks --region eu-north-1 --query "StackSummaries[0]" || echo "Warning: CloudFormation permission check failed"
       
       - name: Bootstrap CDK environment
         working-directory: ./infrastructure
