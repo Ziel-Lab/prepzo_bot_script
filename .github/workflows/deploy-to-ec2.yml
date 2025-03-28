@@ -115,84 +115,95 @@ jobs:
           echo '' >> lib/prepzo-bot-stack.ts
           echo '    // User data script for EC2 instance' >> lib/prepzo-bot-stack.ts
           echo '    const userData = ec2.UserData.forLinux();' >> lib/prepzo-bot-stack.ts
-          echo '    userData.addCommands(' >> lib/prepzo-bot-stack.ts
-          echo '      "yum update -y",' >> lib/prepzo-bot-stack.ts
-          echo '      "yum install -y git python3 python3-pip python3-venv nc curl systemd",' >> lib/prepzo-bot-stack.ts
-          echo '      "cd /home/ec2-user",' >> lib/prepzo-bot-stack.ts
-          echo '      "git clone https://github.com/${{ github.repository }}.git prepzo_bot",' >> lib/prepzo-bot-stack.ts
-          echo '      "chown -R ec2-user:ec2-user prepzo_bot",' >> lib/prepzo-bot-stack.ts
-          echo '      "cd prepzo_bot",' >> lib/prepzo-bot-stack.ts
-          echo '      "python3 -m venv venv",' >> lib/prepzo-bot-stack.ts
-          echo '      "source venv/bin/activate",' >> lib/prepzo-bot-stack.ts
-          echo '      "pip install -r requirements.txt || { echo \"Error installing requirements\"; cat requirements.txt; exit 1; }",' >> lib/prepzo-bot-stack.ts
-          echo '      "pip install requests paramiko flask",' >> lib/prepzo-bot-stack.ts
-          echo '      "mkdir -p /home/ec2-user/.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"SUPABASE_URL=${{ secrets.SUPABASE_URL }}\" > /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"DEEPGRAM_API_KEY=${{ secrets.DEEPGRAM_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"LIVEKIT_URL=${{ secrets.LIVEKIT_URL }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"LIVEKIT_API_KEY=${{ secrets.LIVEKIT_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"CARTESIA_API_KEY=${{ secrets.CARTESIA_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"ELEVENLABS_API_KEY=${{ secrets.ELEVENLABS_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"HEALTH_CHECK_PORT=8080\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"ENVIRONMENT=production\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"GIT_COMMIT=${{ github.sha }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Create simple health check endpoint in case the app takes time to start",' >> lib/prepzo-bot-stack.ts
-          echo '      "cat > /home/ec2-user/prepzo_bot/health_server.py << EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "import flask",' >> lib/prepzo-bot-stack.ts
-          echo '      "import os",' >> lib/prepzo-bot-stack.ts
-          echo '      "app = flask.Flask(__name__)",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "@app.route(\'/health\')",' >> lib/prepzo-bot-stack.ts
-          echo '      "def health():",' >> lib/prepzo-bot-stack.ts
-          echo '      "    return {\'status\': \'ok\', \'service\': \'prepzo-bot\'}",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "if __name__ == \'__main__\':",' >> lib/prepzo-bot-stack.ts
-          echo '      "    app.run(host=\'0.0.0.0\', port=8080)",' >> lib/prepzo-bot-stack.ts
-          echo '      "EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "cat > /etc/systemd/system/prepzo-health.service << EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "[Unit]",' >> lib/prepzo-bot-stack.ts
-          echo '      "Description=Prepzo Health Check Service",' >> lib/prepzo-bot-stack.ts
-          echo '      "After=network.target",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "[Service]",' >> lib/prepzo-bot-stack.ts
-          echo '      "User=ec2-user",' >> lib/prepzo-bot-stack.ts
-          echo '      "WorkingDirectory=/home/ec2-user/prepzo_bot",' >> lib/prepzo-bot-stack.ts
-          echo '      "EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python health_server.py",' >> lib/prepzo-bot-stack.ts
-          echo '      "Restart=always",' >> lib/prepzo-bot-stack.ts
-          echo '      "RestartSec=5",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "[Install]",' >> lib/prepzo-bot-stack.ts
-          echo '      "WantedBy=multi-user.target",' >> lib/prepzo-bot-stack.ts
-          echo '      "EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "cat > /etc/systemd/system/prepzo-bot.service << EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "[Unit]",' >> lib/prepzo-bot-stack.ts
-          echo '      "Description=Prepzo Bot Service",' >> lib/prepzo-bot-stack.ts
-          echo '      "After=network.target",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "[Service]",' >> lib/prepzo-bot-stack.ts
-          echo '      "User=ec2-user",' >> lib/prepzo-bot-stack.ts
-          echo '      "WorkingDirectory=/home/ec2-user/prepzo_bot",' >> lib/prepzo-bot-stack.ts
-          echo '      "EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
-          echo '      "ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python main.py start",' >> lib/prepzo-bot-stack.ts
-          echo '      "Restart=always",' >> lib/prepzo-bot-stack.ts
-          echo '      "RestartSec=10",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "[Install]",' >> lib/prepzo-bot-stack.ts
-          echo '      "WantedBy=multi-user.target",' >> lib/prepzo-bot-stack.ts
-          echo '      "EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "systemctl daemon-reload",' >> lib/prepzo-bot-stack.ts
-          echo '      "systemctl enable prepzo-health",' >> lib/prepzo-bot-stack.ts
-          echo '      "systemctl start prepzo-health",' >> lib/prepzo-bot-stack.ts
-          echo '      "systemctl enable prepzo-bot",' >> lib/prepzo-bot-stack.ts
-          echo '      "systemctl start prepzo-bot || echo \"Main service failed to start, but health endpoint should be running\"",' >> lib/prepzo-bot-stack.ts
-          echo '      "iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"net.ipv4.ip_forward=1\" >> /etc/sysctl.conf",' >> lib/prepzo-bot-stack.ts
-          echo '      "sysctl -p",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \"Deployment complete, health check available at http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)/health\""' >> lib/prepzo-bot-stack.ts
-          echo '    );' >> lib/prepzo-bot-stack.ts
+          echo '    // Prepare user data commands' >> lib/prepzo-bot-stack.ts
+          echo '    const userDataCommands = `#!/bin/bash' >> lib/prepzo-bot-stack.ts
+          echo 'yum update -y' >> lib/prepzo-bot-stack.ts
+          echo 'yum install -y git python3 python3-pip python3-venv nc curl systemd' >> lib/prepzo-bot-stack.ts
+          echo 'cd /home/ec2-user' >> lib/prepzo-bot-stack.ts
+          echo 'git clone https://github.com/${process.env.GITHUB_REPOSITORY || "${{ github.repository }}"}.git prepzo_bot' >> lib/prepzo-bot-stack.ts
+          echo 'chown -R ec2-user:ec2-user prepzo_bot' >> lib/prepzo-bot-stack.ts
+          echo 'cd prepzo_bot' >> lib/prepzo-bot-stack.ts
+          echo 'python3 -m venv venv' >> lib/prepzo-bot-stack.ts
+          echo 'source venv/bin/activate' >> lib/prepzo-bot-stack.ts
+          echo 'pip install -r requirements.txt || { echo "Error installing requirements"; cat requirements.txt; }' >> lib/prepzo-bot-stack.ts
+          echo 'pip install requests paramiko flask' >> lib/prepzo-bot-stack.ts
+          echo 'mkdir -p /home/ec2-user/.env' >> lib/prepzo-bot-stack.ts
+          echo 'cat > /home/ec2-user/.env/prepzo_bot.env << EOF' >> lib/prepzo-bot-stack.ts
+          echo 'SUPABASE_URL=${process.env.SUPABASE_URL || ""}' >> lib/prepzo-bot-stack.ts
+          echo 'SUPABASE_SERVICE_ROLE_KEY=${process.env.SUPABASE_SERVICE_ROLE_KEY || ""}' >> lib/prepzo-bot-stack.ts
+          echo 'OPENAI_API_KEY=${process.env.OPENAI_API_KEY || ""}' >> lib/prepzo-bot-stack.ts
+          echo 'DEEPGRAM_API_KEY=${process.env.DEEPGRAM_API_KEY || ""}' >> lib/prepzo-bot-stack.ts
+          echo 'LIVEKIT_URL=${process.env.LIVEKIT_URL || ""}' >> lib/prepzo-bot-stack.ts
+          echo 'LIVEKIT_API_KEY=${process.env.LIVEKIT_API_KEY || ""}' >> lib/prepzo-bot-stack.ts
+          echo 'CARTESIA_API_KEY=${process.env.CARTESIA_API_KEY || ""}' >> lib/prepzo-bot-stack.ts
+          echo 'ELEVENLABS_API_KEY=${process.env.ELEVENLABS_API_KEY || ""}' >> lib/prepzo-bot-stack.ts
+          echo 'HEALTH_CHECK_PORT=8080' >> lib/prepzo-bot-stack.ts
+          echo 'ENVIRONMENT=production' >> lib/prepzo-bot-stack.ts
+          echo 'GIT_COMMIT=${process.env.GITHUB_SHA || ""}' >> lib/prepzo-bot-stack.ts
+          echo 'EOF' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '# Create health server' >> lib/prepzo-bot-stack.ts
+          echo 'cat > /home/ec2-user/prepzo_bot/health_server.py << EOF' >> lib/prepzo-bot-stack.ts
+          echo 'import flask' >> lib/prepzo-bot-stack.ts
+          echo 'import os' >> lib/prepzo-bot-stack.ts
+          echo 'app = flask.Flask(__name__)' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '@app.route("/health")' >> lib/prepzo-bot-stack.ts
+          echo 'def health():' >> lib/prepzo-bot-stack.ts
+          echo '    return {"status": "ok", "service": "prepzo-bot"}' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo 'if __name__ == "__main__":' >> lib/prepzo-bot-stack.ts
+          echo '    app.run(host="0.0.0.0", port=8080)' >> lib/prepzo-bot-stack.ts
+          echo 'EOF' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '# Create services' >> lib/prepzo-bot-stack.ts
+          echo 'cat > /etc/systemd/system/prepzo-health.service << EOF' >> lib/prepzo-bot-stack.ts
+          echo '[Unit]' >> lib/prepzo-bot-stack.ts
+          echo 'Description=Prepzo Health Check Service' >> lib/prepzo-bot-stack.ts
+          echo 'After=network.target' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '[Service]' >> lib/prepzo-bot-stack.ts
+          echo 'User=ec2-user' >> lib/prepzo-bot-stack.ts
+          echo 'WorkingDirectory=/home/ec2-user/prepzo_bot' >> lib/prepzo-bot-stack.ts
+          echo 'EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env' >> lib/prepzo-bot-stack.ts
+          echo 'ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python health_server.py' >> lib/prepzo-bot-stack.ts
+          echo 'Restart=always' >> lib/prepzo-bot-stack.ts
+          echo 'RestartSec=5' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '[Install]' >> lib/prepzo-bot-stack.ts
+          echo 'WantedBy=multi-user.target' >> lib/prepzo-bot-stack.ts
+          echo 'EOF' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo 'cat > /etc/systemd/system/prepzo-bot.service << EOF' >> lib/prepzo-bot-stack.ts
+          echo '[Unit]' >> lib/prepzo-bot-stack.ts
+          echo 'Description=Prepzo Bot Service' >> lib/prepzo-bot-stack.ts
+          echo 'After=network.target' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '[Service]' >> lib/prepzo-bot-stack.ts
+          echo 'User=ec2-user' >> lib/prepzo-bot-stack.ts
+          echo 'WorkingDirectory=/home/ec2-user/prepzo_bot' >> lib/prepzo-bot-stack.ts
+          echo 'EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env' >> lib/prepzo-bot-stack.ts
+          echo 'ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python main.py start' >> lib/prepzo-bot-stack.ts
+          echo 'Restart=always' >> lib/prepzo-bot-stack.ts
+          echo 'RestartSec=10' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '[Install]' >> lib/prepzo-bot-stack.ts
+          echo 'WantedBy=multi-user.target' >> lib/prepzo-bot-stack.ts
+          echo 'EOF' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '# Start services' >> lib/prepzo-bot-stack.ts
+          echo 'systemctl daemon-reload' >> lib/prepzo-bot-stack.ts
+          echo 'systemctl enable prepzo-health' >> lib/prepzo-bot-stack.ts
+          echo 'systemctl start prepzo-health' >> lib/prepzo-bot-stack.ts
+          echo 'systemctl enable prepzo-bot' >> lib/prepzo-bot-stack.ts
+          echo 'systemctl start prepzo-bot || echo "Main service failed to start, but health endpoint should be running"' >> lib/prepzo-bot-stack.ts
+          echo 'iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080' >> lib/prepzo-bot-stack.ts
+          echo 'echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf' >> lib/prepzo-bot-stack.ts
+          echo 'sysctl -p' >> lib/prepzo-bot-stack.ts
+          echo '`;' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '    // Add the commands to the user data' >> lib/prepzo-bot-stack.ts
+          echo '    userData.addCommands(userDataCommands);' >> lib/prepzo-bot-stack.ts
           echo '' >> lib/prepzo-bot-stack.ts
           echo '    // EC2 instance' >> lib/prepzo-bot-stack.ts
           echo '    const instance = new ec2.Instance(this, "PrepzoBotInstance", {' >> lib/prepzo-bot-stack.ts
@@ -227,6 +238,30 @@ jobs:
           echo '    region: process.env.CDK_DEFAULT_REGION' >> bin/prepzo-bot.ts
           echo '  },' >> bin/prepzo-bot.ts
           echo '});' >> bin/prepzo-bot.ts
+
+          # Keep the original entry point but make sure it uses our stack too
+          if [ -f "bin/infrastructure.ts" ]; then
+            echo "Modifying original entry point file to also deploy our stack..."
+            
+            # Backup the original file
+            cp bin/infrastructure.ts bin/infrastructure.ts.bak
+            
+            # Add our stack import to the original file
+            IMPORT_LINE="import { PrepzoBotStack } from '../lib/prepzo-bot-stack';"
+            STACK_LINE="new PrepzoBotStack(app, 'PrepzoBotStack', { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION } });"
+            
+            # Insert import after the first import line
+            grep -q "import " bin/infrastructure.ts && \
+              sed -i "0,/import /s/import /import / \n$IMPORT_LINE\nimport /" bin/infrastructure.ts || \
+              echo "No import lines found, adding at top" && \
+              sed -i "1s/^/$IMPORT_LINE\n/" bin/infrastructure.ts
+            
+            # Insert stack instantiation before the last line
+            sed -i "$ i $STACK_LINE" bin/infrastructure.ts
+            
+            echo "Modified infrastructure.ts:"
+            cat bin/infrastructure.ts
+          fi
 
           # Show the stack
           echo "Available stacks after creation:"
