@@ -593,8 +593,10 @@ jobs:
                 if [ $? -ne 0 ]; then
                   echo "nc failed, trying with socat..."
                   sudo yum install -y socat || true
-                  # Simple version with less quotes
-                  sudo bash -c 'socat TCP-LISTEN:80,fork,reuseaddr SYSTEM:"echo -e \"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\\\"status\\\":\\\"ok\\\"}\"" &'
+                  # Create a response file first
+                  echo -e 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{"status":"ok"}' | sudo tee /tmp/http_response.txt
+                  # Use the file with socat to avoid quote issues
+                  sudo bash -c "nohup socat TCP-LISTEN:80,fork,reuseaddr SYSTEM:'cat /tmp/http_response.txt' > /tmp/socat.log 2>&1 &"
                 fi
               fi
 EOF
