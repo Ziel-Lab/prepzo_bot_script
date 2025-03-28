@@ -43,6 +43,14 @@ jobs:
         run: |
           npm install -g aws-cdk
           cdk init app --language typescript
+          
+          # Debug CDK initialization
+          echo "Created CDK project structure:"
+          ls -la
+          
+          # Check default app.ts file
+          echo "Default app.ts content:"
+          cat lib/infrastructure-stack.ts || echo "File not found"
       
       - name: Install CDK dependencies
         working-directory: ./infrastructure
@@ -53,6 +61,15 @@ jobs:
       - name: Create CDK stack
         working-directory: ./infrastructure
         run: |
+          # Check what files were created by CDK init
+          echo "Files created by CDK init:"
+          find . -type f | grep -v "node_modules"
+          
+          # Find the default stack name
+          DEFAULT_STACK_NAME=$(grep -r "class" --include="*.ts" lib/ | head -1 | awk -F 'class ' '{print $2}' | awk -F ' ' '{print $1}' || echo "UnknownStack")
+          echo "Default stack name detected: $DEFAULT_STACK_NAME"
+          
+          # Now create our stack with the correct name
           cat > lib/prepzo-bot-stack.ts << 'EOL'
           import * as cdk from 'aws-cdk-lib';
           import { Construct } from 'constructs';
@@ -184,6 +201,32 @@ jobs:
             },
           });
           EOL
+          
+          # Modify the main entry point to use our stack instead of the default one
+          # First check which file CDK init created
+          MAIN_FILE=$(find bin -name "*.ts" | grep -v "prepzo-bot.ts" | head -1 || echo "")
+          if [ -n "$MAIN_FILE" ]; then
+            echo "Found main CDK file: $MAIN_FILE"
+            echo "Updating main CDK file to use PrepzoBotStack:"
+            cat > "$MAIN_FILE" << 'EOL'
+            #!/usr/bin/env node
+            import 'source-map-support/register';
+            import * as cdk from 'aws-cdk-lib';
+            import { PrepzoBotStack } from '../lib/prepzo-bot-stack';
+
+            const app = new cdk.App();
+            new PrepzoBotStack(app, 'PrepzoBotStack', {
+              env: { 
+                account: process.env.CDK_DEFAULT_ACCOUNT, 
+                region: process.env.CDK_DEFAULT_REGION 
+              },
+            });
+            EOL
+          fi
+          
+          # Show the stack
+          echo "Available stacks after creation:"
+          npx cdk ls || echo "Failed to list stacks"
       
       - name: Check AWS credentials and permissions
         run: |
@@ -267,7 +310,8 @@ jobs:
           
           # Deploy with verbose output
           echo "Deploying stack (this may take several minutes)..."
-          cdk deploy PrepzoBotStack --require-approval never --verbose
+          # Deploy without specifying stack name to use default stack
+          cdk deploy --all --require-approval never --verbose
           
           # Check if deployment was successful
           if [ $? -ne 0 ]; then
@@ -286,18 +330,55 @@ jobs:
         run: |
           # Wait a moment for outputs to be available
           sleep 15
+          
           # List all stacks to check if our stack exists
           echo "Available CloudFormation stacks:"
-          aws cloudformation list-stacks --query "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName" --output text || echo "Could not list stacks"
+          STACKS=$(aws cloudformation list-stacks --query "StackSummaries[?StackStatus!='DELETE_COMPLETE'].StackName" --output text || echo "Could not list stacks")
+          echo "$STACKS"
           
-          # First try PrepzoBotStack
-          echo "Trying to get outputs from PrepzoBotStack:"
-          IP=$(aws cloudformation describe-stacks --stack-name PrepzoBotStack --query "Stacks[0].Outputs[?ExportName=='PrepzoBotInstanceIP'].OutputValue" --output text 2>/dev/null || echo "")
+          # First try to print all stack outputs for easier debugging
+          echo "Outputs from all stacks:"
+          for STACK in $STACKS; do
+            if [[ "$STACK" != "CDKToolkit" ]]; then
+              echo "Stack: $STACK"
+              aws cloudformation describe-stacks --stack-name $STACK --query "Stacks[0].Outputs" --output json || echo "No outputs"
+            fi
+          done
           
-          # If not found, try InfrastructureStack
-          if [ -z "$IP" ]; then
-            echo "PrepzoBotStack not found or has no outputs, trying InfrastructureStack:"
+          # Try several possible stack names and output keys
+          IP=""
+          
+          # Try PrepzoBotStack with ExportName
+          if [[ "$STACKS" == *"PrepzoBotStack"* ]]; then
+            echo "Trying PrepzoBotStack with ExportName:"
+            IP=$(aws cloudformation describe-stacks --stack-name PrepzoBotStack --query "Stacks[0].Outputs[?ExportName=='PrepzoBotInstanceIP'].OutputValue" --output text 2>/dev/null || echo "")
+          fi
+          
+          # Try PrepzoBotStack with OutputKey
+          if [[ -z "$IP" && "$STACKS" == *"PrepzoBotStack"* ]]; then
+            echo "Trying PrepzoBotStack with OutputKey:"
+            IP=$(aws cloudformation describe-stacks --stack-name PrepzoBotStack --query "Stacks[0].Outputs[?OutputKey=='InstancePublicIP'].OutputValue" --output text 2>/dev/null || echo "")
+          fi
+          
+          # Try InfrastructureStack with OutputKey
+          if [[ -z "$IP" && "$STACKS" == *"InfrastructureStack"* ]]; then
+            echo "Trying InfrastructureStack with OutputKey:"
             IP=$(aws cloudformation describe-stacks --stack-name InfrastructureStack --query "Stacks[0].Outputs[?OutputKey=='InstancePublicIP'].OutputValue" --output text 2>/dev/null || echo "")
+          fi
+          
+          # Try all other stacks
+          if [[ -z "$IP" ]]; then
+            echo "Trying all stacks for IP output:"
+            for STACK in $STACKS; do
+              if [[ "$STACK" != "CDKToolkit" ]]; then
+                echo "Checking $STACK for instance IP:"
+                IP=$(aws cloudformation describe-stacks --stack-name $STACK --query "Stacks[0].Outputs[?contains(OutputKey, 'Instance') || contains(OutputKey, 'IP')].OutputValue" --output text 2>/dev/null || echo "")
+                if [[ -n "$IP" ]]; then
+                  echo "Found IP in stack $STACK: $IP"
+                  break
+                fi
+              fi
+            done
           fi
           
           if [ -z "$IP" ]; then
