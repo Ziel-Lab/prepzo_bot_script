@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 # from livekit.agents.tts import TTSService
 import prompt
 from openai import OpenAI
+import version
 
 logger = logging.getLogger("my-worker")
 logger.setLevel(logging.INFO)
@@ -1256,7 +1257,7 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
         # Attach the new methods to the agent
         agent.prepare_say = prepare_say
         agent.say = optimized_say
-        
+
         # Set up metrics collection
         usage_collector = metrics.UsageCollector()
 
@@ -1689,7 +1690,7 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
                 # Ensure the message is still stored even if speaking fails
                 if assistant_message not in conversation_history:
                     conversation_history.append(assistant_message)
-                await store_full_conversation()
+                    await store_full_conversation()
                 logger.error("Stored message despite speech error")
 
         # Send initial welcome message
@@ -1733,8 +1734,59 @@ if __name__ == "__main__":
                 raise Exception("Failed to initialize Supabase client")
             logger.info("Supabase initialized successfully")
             return init_result
+        except Exception as e:
+            logger.error(f"Error during Supabase initialization: {str(e)}")
+            return False
         finally:
             loop.close()
+    
+    # Start health check HTTP server for deployment verification
+    def start_health_check_server():
+        import threading
+        import http.server
+        import socketserver
+        import json
+        from datetime import datetime
+        import version
+        
+        PORT = int(os.environ.get("HEALTH_CHECK_PORT", 8080))
+        
+        class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/health":
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    
+                    # Get version info
+                    ver_info = version.get_version_info()
+                    
+                    # Prepare health check data
+                    health_data = {
+                        "status": "ok",
+                        "service": "prepzo-bot",
+                        "version": ver_info["version"],
+                        "build_date": ver_info["build_date"],
+                        "git_commit": ver_info["git_commit"],
+                        "timestamp": datetime.now().isoformat(),
+                        "uptime": time.time() - START_TIME,
+                        "environment": os.environ.get("ENVIRONMENT", "production")
+                    }
+                    
+                    # Send response
+                    self.wfile.write(json.dumps(health_data).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+        
+        httpd = socketserver.TCPServer(("", PORT), HealthCheckHandler)
+        logger.info(f"Health check server started on port {PORT}")
+        
+        # Run server in a separate thread
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    
+    # Record start time for uptime calculation
+    START_TIME = time.time()
     
     # Run the initialization before starting the app
     if not sync_init_supabase():
@@ -1742,12 +1794,20 @@ if __name__ == "__main__":
         import sys
         sys.exit(1)
     
+    # Start health check server
+    try:
+        start_health_check_server()
+        logger.info("Health check server started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start health check server: {str(e)}")
+        logger.error("Continuing without health check endpoint")
+    
     # Standard worker options without async_init
     worker_options = WorkerOptions(
-        entrypoint_fnc=entrypoint,
-        prewarm_fnc=prewarm,
-        worker_type=WorkerType.ROOM
-    )
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+            worker_type=WorkerType.ROOM
+        )
     
     # Start the app after successful initialization
     cli.run_app(worker_options)

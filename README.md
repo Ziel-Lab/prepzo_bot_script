@@ -1,146 +1,87 @@
-# Prepzo AI Career Coach
+# Prepzo Bot
 
-Prepzo is an AI-powered career coaching platform that provides personalized professional guidance through natural voice conversations. The system uses advanced AI to engage in meaningful career development discussions, helping users optimize their career paths and achieve their professional goals.
+An AI voice agent powered by LiveKit, OpenAI, and Deepgram for professional interview preparation and career coaching.
 
 ## Features
 
-- **Natural Voice Interaction**: Engage in real-time voice conversations with the AI career coach
-- **Structured Career Guidance**: Receive personalized career advice and development plans
-- **Multi-modal Communication**: Support for both text and audio interactions
-- **Session Management**: Automatic session handling with timeout protection
-- **Conversation History**: Persistent storage of coaching sessions for future reference
-- **Environment Configuration**: Flexible setup for different deployment environments
+- Real-time voice conversations with an AI assistant
+- Interview preparation and career coaching
+- Location-aware responses using geolocation
+- Emergency web search for up-to-date information
+- Automatic session timeout and conversation management
+- Conversation history stored in Supabase
+
+## Technical Components
+
+- **Voice Agent**: Built using LiveKit's voice agent framework
+- **Speech-to-Text**: Deepgram Nova-2 model for accurate transcription
+- **Text-to-Speech**: OpenAI TTS for natural-sounding voice responses
+- **LLM**: Fine-tuned GPT-4o model for interview coaching
+- **Storage**: Supabase for conversation history and analytics
+- **Deployment**: AWS EC2 via GitHub Actions and AWS CDK
 
 ## Prerequisites
 
-- Python 3.8 or higher
-- Git
-- Access to the following API services:
-  - LiveKit (for real-time communication)
-  - Deepgram (for speech-to-text)
-  - OpenAI (for LLM and text-to-speech)
-  - Supabase (for data storage)
+- Python 3.10+
+- LiveKit server access
+- Supabase account and project
+- OpenAI API access
+- Deepgram API access
 
 ## Environment Variables
 
-Create a `.env` file in the backend directory with the following variables:
+The following environment variables need to be set:
 
-```env
-# LiveKit Configuration
+```
+SUPABASE_URL=your_supabase_url
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_key
+OPENAI_API_KEY=your_openai_key
+DEEPGRAM_API_KEY=your_deepgram_key
 LIVEKIT_URL=your_livekit_url
 LIVEKIT_API_KEY=your_livekit_api_key
-
-# API Keys
-DEEPGRAM_API_KEY=your_deepgram_api_key
-OPENAI_API_KEY=your_openai_api_key
-ELEVENLABS_API_KEY=your_elevenlabs_api_key
-
-# Supabase Configuration
-SUPABASE_URL=your_supabase_url
-SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
 ```
 
-## Installation
+## Local Development Setup
 
-1. Clone the repository:
-```bash
-git clone <repository-url>
-cd backend
-```
+1. Clone the repository
+   ```bash
+   git clone https://github.com/your-username/prepzo_bot_script.git
+   cd prepzo_bot_script
+   ```
 
-2. Create and activate a virtual environment:
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+2. Create a virtual environment
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+3. Install dependencies
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-## Project Structure
+4. Set up environment variables by creating a `.env` file with the required values
 
-```
-backend/
-├── main.py              # Main application entry point
-├── prompt.py           # AI coaching prompt configuration
-├── requirements.txt    # Python dependencies
-└── .env               # Environment variables (not in repo)
-```
+5. Run the application
+   ```bash
+   python main.py
+   ```
 
-## Usage
+## Deployment
 
-1. Start the backend server:
-```bash
-python main.py
-```
+This project uses GitHub Actions for CI/CD to AWS EC2. See [GITHUB_ACTIONS_SETUP.md](GITHUB_ACTIONS_SETUP.md) for detailed setup instructions.
 
-2. The server will initialize and wait for client connections.
+## Architecture
 
-3. Sessions are limited to 20 minutes by default.
+The agent follows this architecture:
+1. User's voice is captured and transcribed in real-time by Deepgram
+2. The transcription is sent to a fine-tuned GPT-4o model
+3. The model generates a response, which is converted to speech by OpenAI TTS
+4. The speech is played back to the user in real-time
+5. Conversation history is stored in Supabase for later analysis
 
-## AI Coaching Approach
+## License
 
-The AI coach (Prepzo) follows a structured approach:
-
-1. **Trust Building**
-   - Introduces itself as Prepzo
-   - Requests brief professional background
-
-2. **Focused Questioning**
-   - Explores rewarding roles
-   - Identifies key achievements
-   - Discusses future goals
-
-3. **Challenge Identification**
-   - Identifies current professional hurdles
-   - Develops targeted solutions
-
-4. **Action Planning**
-   - Offers strategic job opportunities
-   - Suggests skill-building resources
-   - Helps refine career narrative
-
-## Technical Details
-
-### Voice Processing
-- Uses Deepgram for speech-to-text conversion
-- OpenAI TTS for text-to-speech synthesis
-- Silero VAD for voice activity detection
-
-### Data Storage
-- Supabase for conversation history storage
-- Structured data model for session management
-
-### Session Management
-- 20-minute session timeout
-- Automatic conversation storage
-- Graceful session termination
-
-## Development
-
-### Adding New Features
-1. Create a new branch for your feature
-2. Make your changes
-3. Test thoroughly
-4. Submit a pull request
-
-### Testing
-```bash
-# Run tests
-python -m pytest
-
-# Run with coverage
-python -m pytest --cov=.
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a new Pull Request
+[MIT License](LICENSE)
 
 

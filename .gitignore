@@ -10,7 +10,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -24,24 +23,42 @@ wheels/
 venv/
 env/
 ENV/
-.env
-.env.local
-.venv
-env.bak/
-venv.bak/
 
-# IDE specific files
+# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
-.DS_Store
-Thumbs.db
+
+# Environment variables
+.env
+.env.local
+
+# AWS CDK
+infrastructure/node_modules/
+infrastructure/cdk.out/
+infrastructure/.env
+infrastructure/cdk-outputs.json
+
+# AWS
+.aws/
+.aws-sam/
 
 # Logs
-*.log
 logs/
-log/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS Generated
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 
 # Local development settings
 .env.local
@@ -62,24 +79,6 @@ coverage.xml
 
 # Jupyter Notebook
 .ipynb_checkpoints
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
 # Unit test / coverage reports
 htmlcov/
