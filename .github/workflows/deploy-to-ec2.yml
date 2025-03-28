@@ -251,24 +251,57 @@ jobs:
           if [ -f "bin/infrastructure.ts" ]; then
             echo "Modifying original entry point file to also deploy our stack..."
             
+            # First check the original file structure
+            echo "Original infrastructure.ts content:"
+            cat bin/infrastructure.ts
+            
             # Backup the original file
             cp bin/infrastructure.ts bin/infrastructure.ts.bak
             
-            # Add our stack import to the original file
-            IMPORT_LINE="import { PrepzoBotStack } from '../lib/prepzo-bot-stack';"
-            STACK_LINE="new PrepzoBotStack(app, 'PrepzoBotStack', { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION } });"
+            # Add the import at the top properly
+            grep -q "PrepzoBotStack" bin/infrastructure.ts || sed -i '1s/^/import { PrepzoBotStack } from '\''..\/lib\/prepzo-bot-stack'\'';\n/' bin/infrastructure.ts
             
-            # Use different approach to modify the file
-            echo "Adding import statement to infrastructure.ts"
-            echo -e "$IMPORT_LINE\n$(cat bin/infrastructure.ts)" > bin/infrastructure.ts.tmp
-            mv bin/infrastructure.ts.tmp bin/infrastructure.ts
+            # Find the line with app.synth() and add our stack before it
+            if grep -q "app\.synth\(\)" bin/infrastructure.ts; then
+              # Use awk to insert our stack before app.synth()
+              TEMP_FILE=$(mktemp)
+              awk '/app\.synth\(\)/ { print "// Add PrepzoBotStack\nnew PrepzoBotStack(app, \"PrepzoBotStack\", { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION } });\n"; } { print; }' bin/infrastructure.ts > "$TEMP_FILE"
+              mv "$TEMP_FILE" bin/infrastructure.ts
+            else
+              # If no app.synth(), add our stack at the end
+              echo "" >> bin/infrastructure.ts
+              echo "// Add PrepzoBotStack" >> bin/infrastructure.ts
+              echo "new PrepzoBotStack(app, 'PrepzoBotStack', { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION } });" >> bin/infrastructure.ts
+            fi
             
-            # Insert stack instantiation at end but before the last line
-            echo "Adding stack instantiation to infrastructure.ts"
-            LAST_LINE=$(tail -n 1 bin/infrastructure.ts)
-            sed -i "$ d" bin/infrastructure.ts
-            echo "$STACK_LINE" >> bin/infrastructure.ts
-            echo "$LAST_LINE" >> bin/infrastructure.ts
+            # Verify the file is valid TypeScript
+            npx tsc bin/infrastructure.ts --noEmit
+            if [ $? -ne 0 ]; then
+              echo "TypeScript validation failed. Using fallback approach."
+              # Completely replace the file with a known good structure
+              cat > bin/infrastructure.ts << 'EOF'
+#!/usr/bin/env node
+import 'source-map-support/register';
+import * as cdk from 'aws-cdk-lib';
+import { InfrastructureStack } from '../lib/infrastructure-stack';
+import { PrepzoBotStack } from '../lib/prepzo-bot-stack';
+
+const app = new cdk.App();
+new InfrastructureStack(app, 'InfrastructureStack', {
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+
+// Add PrepzoBotStack
+new PrepzoBotStack(app, 'PrepzoBotStack', { 
+  env: { 
+    account: process.env.CDK_DEFAULT_ACCOUNT, 
+    region: process.env.CDK_DEFAULT_REGION 
+  }
+});
+
+app.synth();
+EOF
+            fi
             
             echo "Modified infrastructure.ts:"
             cat bin/infrastructure.ts
