@@ -548,55 +548,55 @@ EOF
           echo "Running final diagnostics and collecting logs..."
           
           # Final diagnostics - gather as much info as possible
-          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/ec2_key ec2-user@$INSTANCE_IP 'bash -s' << 'EOF' || echo "Could not connect via SSH for final diagnostics"
-          echo "==== FINAL DIAGNOSTICS REPORT ===="
-          echo "System uptime: $(uptime)"
-          echo "Memory usage:"
-          free -h
-          
-          echo "==== CLOUD INIT LOGS ===="
-          sudo cat /var/log/cloud-init-output.log | tail -n 100 || echo "Could not read cloud-init log"
-          
-          echo "==== INSTANCE SETUP STATUS ===="
-          if [ -f /var/tmp/setup_complete ]; then
-            echo "✅ Setup script completed at: $(stat -c %y /var/tmp/setup_complete)"
-          else
-            echo "⚠️ Setup script has not completed yet"
-          fi
-          
-          echo "==== HEALTH CHECK STATUS ===="
-          if [ -f /home/ec2-user/prepzo_bot/health_server.py ]; then
-            echo "✅ Health check server file exists"
-            cat /home/ec2-user/prepzo_bot/health_server.py
-          else
-            echo "⚠️ Health check server file not found"
-          fi
-          
-          echo "==== MANUAL HEALTH CHECK SETUP ===="
-          echo "Attempting to manually start health check..."
-          cd /home/ec2-user/prepzo_bot || exit 1
-          source venv/bin/activate || echo "Could not activate venv"
-          
-          # Create a temporary health check file if it doesn't exist
-          if [ ! -f health_server.py ]; then
-            echo "Creating temporary health check server..."
-            echo '
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/ec2_key ec2-user@$INSTANCE_IP 'bash -s' << EOSSH || echo "Could not connect via SSH for final diagnostics"
+echo "==== FINAL DIAGNOSTICS REPORT ===="
+echo "System uptime: $(uptime)"
+echo "Memory usage:"
+free -h
+
+echo "==== CLOUD INIT LOGS ===="
+sudo cat /var/log/cloud-init-output.log | tail -n 100 || echo "Could not read cloud-init log"
+
+echo "==== INSTANCE SETUP STATUS ===="
+if [ -f /var/tmp/setup_complete ]; then
+  echo "✅ Setup script completed at: $(stat -c %y /var/tmp/setup_complete)"
+else
+  echo "⚠️ Setup script has not completed yet"
+fi
+
+echo "==== HEALTH CHECK STATUS ===="
+if [ -f /home/ec2-user/prepzo_bot/health_server.py ]; then
+  echo "✅ Health check server file exists"
+  cat /home/ec2-user/prepzo_bot/health_server.py
+else
+  echo "⚠️ Health check server file not found"
+fi
+
+echo "==== MANUAL HEALTH CHECK SETUP ===="
+echo "Attempting to manually start health check..."
+cd /home/ec2-user/prepzo_bot || exit 1
+source venv/bin/activate || echo "Could not activate venv"
+
+# Create a temporary health check file if it doesn't exist
+if [ ! -f health_server.py ]; then
+  echo "Creating temporary health check server..."
+  cat > temp_health.py << EOF
 import os
 from flask import Flask
 app = Flask(__name__)
 @app.route("/health")
 def health():
-    return "{\\"status\\":\\"ok\\"}"
+    return '{"status":"ok"}'
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
-' > temp_health.py
-            
-            python temp_health.py &
-            echo "Started temporary health server, waiting 5 seconds..."
-            sleep 5
-            curl -v localhost:8080/health || echo "Still cannot connect to health endpoint"
-          fi
 EOF
+  
+  python temp_health.py &
+  echo "Started temporary health server, waiting 5 seconds..."
+  sleep 5
+  curl -v localhost:8080/health || echo "Still cannot connect to health endpoint"
+fi
+EOSSH
           
           echo "Deployment might still be in progress. You can check the status later by SSH into the instance."
           echo "Instance IP: $INSTANCE_IP"
