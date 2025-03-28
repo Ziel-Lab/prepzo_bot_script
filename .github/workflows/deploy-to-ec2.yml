@@ -251,6 +251,8 @@ EOF
           }
       
       - name: Deploy CDK Stack
+        id: get-ip
+        working-directory: ./infrastructure
         run: |
           # Debug CDK initialization
           echo "Created CDK project structure:"
@@ -288,14 +290,25 @@ EOF
           echo "Attempting to get instance IP from InfrastructureStack..."
           instance_ip=$(aws cloudformation describe-stacks \
             --stack-name InfrastructureStack \
-            --query 'Stacks[0].Outputs[?OutputKey==`InstanceIP`].OutputValue' \
+            --query 'Stacks[0].Outputs[?OutputKey==`InstancePublicIP`].OutputValue' \
             --output text)
           
           if [ -z "$instance_ip" ]; then
-            echo "Could not find InstanceIP in InfrastructureStack outputs"
+            echo "Could not find InstancePublicIP in InfrastructureStack outputs"
             echo "Checking all stack outputs..."
             aws cloudformation describe-stacks --stack-name InfrastructureStack --query 'Stacks[0].Outputs'
-            exit 1
+            
+            # Try PrepzoBotStack as fallback
+            echo "Trying PrepzoBotStack as fallback..."
+            instance_ip=$(aws cloudformation describe-stacks \
+              --stack-name PrepzoBotStack \
+              --query 'Stacks[0].Outputs[?OutputKey==`InstancePublicIP`].OutputValue' \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -z "$instance_ip" ]; then
+              echo "Could not find instance IP in any stack"
+              exit 1
+            fi
           fi
           
           echo "Found instance IP: $instance_ip"
@@ -305,7 +318,7 @@ EOF
           echo "Checking recent CloudFormation events..."
           aws cloudformation describe-stack-events \
             --stack-name InfrastructureStack \
-            --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`].[LogicalResourceId,ResourceStatusReason]'
+            --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`].[LogicalResourceId,ResourceStatusReason]' || echo "No failed events found"
       
       - name: Install dependencies for verification
         run: pip install requests
