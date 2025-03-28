@@ -69,148 +69,131 @@ jobs:
           DEFAULT_STACK_NAME=$(grep -r "class" --include="*.ts" lib/ | head -1 | awk -F 'class ' '{print $2}' | awk -F ' ' '{print $1}' || echo "UnknownStack")
           echo "Default stack name detected: $DEFAULT_STACK_NAME"
           
-          # Create the stack file with proper escaping of GitHub Actions expressions
-          cat > lib/prepzo-bot-stack.ts << 'EOL'
-import * as cdk from 'aws-cdk-lib';
-import { Construct } from 'constructs';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import * as iam from 'aws-cdk-lib/aws-iam';
-
-export class PrepzoBotStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
-    super(scope, id, props);
-
-    // Create a VPC
-    const vpc = new ec2.Vpc(this, 'PrepzoBotVPC', {
-      maxAzs: 2,
-      natGateways: 0,
-      subnetConfiguration: [
-        {
-          name: 'public',
-          subnetType: ec2.SubnetType.PUBLIC,
-        }
-      ],
-    });
-
-    // Security group for the EC2 instance
-    const securityGroup = new ec2.SecurityGroup(this, 'PrepzoBotSecurityGroup', {
-      vpc,
-      description: 'Allow SSH and HTTP(S) access',
-      allowAllOutbound: true,
-    });
-
-    // Add inbound rules
-    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'Allow SSH access from anywhere');
-    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), 'Allow HTTP access from anywhere');
-    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'Allow HTTPS access from anywhere');
-    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(3000), 'Allow access on port 3000');
-    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(8080), 'Allow access to health check endpoint');
-
-    // Create a role for the EC2 instance
-    const role = new iam.Role(this, 'PrepzoBotRole', {
-      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
-    });
-
-    // Add managed policies to the role
-    role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'));
-    
-    // User data script for EC2 instance
-    const userData = ec2.UserData.forLinux();
-    userData.addCommands(
-      'yum update -y',
-      'yum install -y git python3 python3-pip python3-venv',
-      'cd /home/ec2-user',
-      'git clone https://github.com/GITHUB_REPOSITORY.git prepzo_bot',
-      'chown -R ec2-user:ec2-user prepzo_bot',
-      'cd prepzo_bot',
-      'python3 -m venv venv',
-      'source venv/bin/activate',
-      'pip install -r requirements.txt',
-      'pip install requests paramiko',
-      'mkdir -p /home/ec2-user/.env',
-      'echo "SUPABASE_URL=SUPABASE_URL_VALUE" > /home/ec2-user/.env/prepzo_bot.env',
-      'echo "SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY_VALUE" >> /home/ec2-user/.env/prepzo_bot.env',
-      'echo "OPENAI_API_KEY=OPENAI_API_KEY_VALUE" >> /home/ec2-user/.env/prepzo_bot.env',
-      'echo "DEEPGRAM_API_KEY=DEEPGRAM_API_KEY_VALUE" >> /home/ec2-user/.env/prepzo_bot.env',
-      'echo "LIVEKIT_URL=LIVEKIT_URL_VALUE" >> /home/ec2-user/.env/prepzo_bot.env',
-      'echo "LIVEKIT_API_KEY=LIVEKIT_API_KEY_VALUE" >> /home/ec2-user/.env/prepzo_bot.env',
-      'echo "CARTESIA_API_KEY=CARTESIA_API_KEY_VALUE" >> /home/ec2-user/.env/prepzo_bot.env',
-      'echo "ELEVENLABS_API_KEY=ELEVENLABS_API_KEY_VALUE" >> /home/ec2-user/.env/prepzo_bot.env',
-      'echo "HEALTH_CHECK_PORT=8080" >> /home/ec2-user/.env/prepzo_bot.env',
-      'echo "ENVIRONMENT=production" >> /home/ec2-user/.env/prepzo_bot.env',
-      'echo "GIT_COMMIT=GIT_SHA_VALUE" >> /home/ec2-user/.env/prepzo_bot.env',
-      'cat > /etc/systemd/system/prepzo-bot.service << EOF',
-      '[Unit]',
-      'Description=Prepzo Bot Service',
-      'After=network.target',
-      '',
-      '[Service]',
-      'User=ec2-user',
-      'WorkingDirectory=/home/ec2-user/prepzo_bot',
-      'EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env',
-      'ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python main.py start',
-      'Restart=always',
-      'RestartSec=10',
-      '',
-      '[Install]',
-      'WantedBy=multi-user.target',
-      'EOF',
-      'systemctl enable prepzo-bot',
-      'systemctl start prepzo-bot',
-      'iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080',
-      'echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf',
-      'sysctl -p'
-    );
-
-    // EC2 instance
-    const instance = new ec2.Instance(this, 'PrepzoBotInstance', {
-      vpc,
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.SMALL),
-      machineImage: ec2.MachineImage.latestAmazonLinux2023(),
-      securityGroup,
-      role,
-      userData,
-      keyName: 'EC2_KEY_NAME_VALUE',
-    });
-
-    // Output the instance public IP
-    new cdk.CfnOutput(this, 'InstancePublicIP', {
-      value: instance.instancePublicIp,
-      description: 'The public IP address of the Prepzo Bot instance',
-      exportName: 'PrepzoBotInstanceIP',
-    });
-  }
-}
-EOL
-
-          # Now replace the placeholder values with the actual GitHub variables
-          sed -i 's|GITHUB_REPOSITORY|${{ github.repository }}|g' lib/prepzo-bot-stack.ts
-          sed -i 's|SUPABASE_URL_VALUE|${{ secrets.SUPABASE_URL }}|g' lib/prepzo-bot-stack.ts
-          sed -i 's|SUPABASE_SERVICE_ROLE_KEY_VALUE|${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}|g' lib/prepzo-bot-stack.ts
-          sed -i 's|OPENAI_API_KEY_VALUE|${{ secrets.OPENAI_API_KEY }}|g' lib/prepzo-bot-stack.ts
-          sed -i 's|DEEPGRAM_API_KEY_VALUE|${{ secrets.DEEPGRAM_API_KEY }}|g' lib/prepzo-bot-stack.ts
-          sed -i 's|LIVEKIT_URL_VALUE|${{ secrets.LIVEKIT_URL }}|g' lib/prepzo-bot-stack.ts
-          sed -i 's|LIVEKIT_API_KEY_VALUE|${{ secrets.LIVEKIT_API_KEY }}|g' lib/prepzo-bot-stack.ts
-          sed -i 's|CARTESIA_API_KEY_VALUE|${{ secrets.CARTESIA_API_KEY }}|g' lib/prepzo-bot-stack.ts
-          sed -i 's|ELEVENLABS_API_KEY_VALUE|${{ secrets.ELEVENLABS_API_KEY }}|g' lib/prepzo-bot-stack.ts
-          sed -i 's|GIT_SHA_VALUE|${{ github.sha }}|g' lib/prepzo-bot-stack.ts
-          sed -i 's|EC2_KEY_NAME_VALUE|${{ secrets.EC2_KEY_NAME }}|g' lib/prepzo-bot-stack.ts
+          # Create stack file using echo commands instead of heredoc
+          echo 'import * as cdk from "aws-cdk-lib";' > lib/prepzo-bot-stack.ts
+          echo 'import { Construct } from "constructs";' >> lib/prepzo-bot-stack.ts
+          echo 'import * as ec2 from "aws-cdk-lib/aws-ec2";' >> lib/prepzo-bot-stack.ts
+          echo 'import * as iam from "aws-cdk-lib/aws-iam";' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo 'export class PrepzoBotStack extends cdk.Stack {' >> lib/prepzo-bot-stack.ts
+          echo '  constructor(scope: Construct, id: string, props?: cdk.StackProps) {' >> lib/prepzo-bot-stack.ts
+          echo '    super(scope, id, props);' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '    // Create a VPC' >> lib/prepzo-bot-stack.ts
+          echo '    const vpc = new ec2.Vpc(this, "PrepzoBotVPC", {' >> lib/prepzo-bot-stack.ts
+          echo '      maxAzs: 2,' >> lib/prepzo-bot-stack.ts
+          echo '      natGateways: 0,' >> lib/prepzo-bot-stack.ts
+          echo '      subnetConfiguration: [' >> lib/prepzo-bot-stack.ts
+          echo '        {' >> lib/prepzo-bot-stack.ts
+          echo '          name: "public",' >> lib/prepzo-bot-stack.ts
+          echo '          subnetType: ec2.SubnetType.PUBLIC,' >> lib/prepzo-bot-stack.ts
+          echo '        }' >> lib/prepzo-bot-stack.ts
+          echo '      ],' >> lib/prepzo-bot-stack.ts
+          echo '    });' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '    // Security group' >> lib/prepzo-bot-stack.ts
+          echo '    const securityGroup = new ec2.SecurityGroup(this, "PrepzoBotSecurityGroup", {' >> lib/prepzo-bot-stack.ts
+          echo '      vpc,' >> lib/prepzo-bot-stack.ts
+          echo '      description: "Allow SSH and HTTP(S) access",' >> lib/prepzo-bot-stack.ts
+          echo '      allowAllOutbound: true,' >> lib/prepzo-bot-stack.ts
+          echo '    });' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '    // Add inbound rules' >> lib/prepzo-bot-stack.ts
+          echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), "Allow SSH access from anywhere");' >> lib/prepzo-bot-stack.ts
+          echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), "Allow HTTP access from anywhere");' >> lib/prepzo-bot-stack.ts
+          echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), "Allow HTTPS access from anywhere");' >> lib/prepzo-bot-stack.ts
+          echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(3000), "Allow access on port 3000");' >> lib/prepzo-bot-stack.ts
+          echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(8080), "Allow access to health check endpoint");' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '    // Create a role for the EC2 instance' >> lib/prepzo-bot-stack.ts
+          echo '    const role = new iam.Role(this, "PrepzoBotRole", {' >> lib/prepzo-bot-stack.ts
+          echo '      assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),' >> lib/prepzo-bot-stack.ts
+          echo '    });' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '    // Add managed policies to the role' >> lib/prepzo-bot-stack.ts
+          echo '    role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonSSMManagedInstanceCore"));' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '    // User data script for EC2 instance' >> lib/prepzo-bot-stack.ts
+          echo '    const userData = ec2.UserData.forLinux();' >> lib/prepzo-bot-stack.ts
+          echo '    userData.addCommands(' >> lib/prepzo-bot-stack.ts
+          echo '      "yum update -y",' >> lib/prepzo-bot-stack.ts
+          echo '      "yum install -y git python3 python3-pip python3-venv",' >> lib/prepzo-bot-stack.ts
+          echo '      "cd /home/ec2-user",' >> lib/prepzo-bot-stack.ts
+          echo '      "git clone https://github.com/${{ github.repository }}.git prepzo_bot",' >> lib/prepzo-bot-stack.ts
+          echo '      "chown -R ec2-user:ec2-user prepzo_bot",' >> lib/prepzo-bot-stack.ts
+          echo '      "cd prepzo_bot",' >> lib/prepzo-bot-stack.ts
+          echo '      "python3 -m venv venv",' >> lib/prepzo-bot-stack.ts
+          echo '      "source venv/bin/activate",' >> lib/prepzo-bot-stack.ts
+          echo '      "pip install -r requirements.txt",' >> lib/prepzo-bot-stack.ts
+          echo '      "pip install requests paramiko",' >> lib/prepzo-bot-stack.ts
+          echo '      "mkdir -p /home/ec2-user/.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"SUPABASE_URL=${{ secrets.SUPABASE_URL }}\" > /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"DEEPGRAM_API_KEY=${{ secrets.DEEPGRAM_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"LIVEKIT_URL=${{ secrets.LIVEKIT_URL }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"LIVEKIT_API_KEY=${{ secrets.LIVEKIT_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"CARTESIA_API_KEY=${{ secrets.CARTESIA_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"ELEVENLABS_API_KEY=${{ secrets.ELEVENLABS_API_KEY }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"HEALTH_CHECK_PORT=8080\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"ENVIRONMENT=production\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"GIT_COMMIT=${{ github.sha }}\" >> /home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "cat > /etc/systemd/system/prepzo-bot.service << EOF",' >> lib/prepzo-bot-stack.ts
+          echo '      "[Unit]",' >> lib/prepzo-bot-stack.ts
+          echo '      "Description=Prepzo Bot Service",' >> lib/prepzo-bot-stack.ts
+          echo '      "After=network.target",' >> lib/prepzo-bot-stack.ts
+          echo '      "",' >> lib/prepzo-bot-stack.ts
+          echo '      "[Service]",' >> lib/prepzo-bot-stack.ts
+          echo '      "User=ec2-user",' >> lib/prepzo-bot-stack.ts
+          echo '      "WorkingDirectory=/home/ec2-user/prepzo_bot",' >> lib/prepzo-bot-stack.ts
+          echo '      "EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env",' >> lib/prepzo-bot-stack.ts
+          echo '      "ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python main.py start",' >> lib/prepzo-bot-stack.ts
+          echo '      "Restart=always",' >> lib/prepzo-bot-stack.ts
+          echo '      "RestartSec=10",' >> lib/prepzo-bot-stack.ts
+          echo '      "",' >> lib/prepzo-bot-stack.ts
+          echo '      "[Install]",' >> lib/prepzo-bot-stack.ts
+          echo '      "WantedBy=multi-user.target",' >> lib/prepzo-bot-stack.ts
+          echo '      "EOF",' >> lib/prepzo-bot-stack.ts
+          echo '      "systemctl enable prepzo-bot",' >> lib/prepzo-bot-stack.ts
+          echo '      "systemctl start prepzo-bot",' >> lib/prepzo-bot-stack.ts
+          echo '      "iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080",' >> lib/prepzo-bot-stack.ts
+          echo '      "echo \"net.ipv4.ip_forward=1\" >> /etc/sysctl.conf",' >> lib/prepzo-bot-stack.ts
+          echo '      "sysctl -p"' >> lib/prepzo-bot-stack.ts
+          echo '    );' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '    // EC2 instance' >> lib/prepzo-bot-stack.ts
+          echo '    const instance = new ec2.Instance(this, "PrepzoBotInstance", {' >> lib/prepzo-bot-stack.ts
+          echo '      vpc,' >> lib/prepzo-bot-stack.ts
+          echo '      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.SMALL),' >> lib/prepzo-bot-stack.ts
+          echo '      machineImage: ec2.MachineImage.latestAmazonLinux2023(),' >> lib/prepzo-bot-stack.ts
+          echo '      securityGroup,' >> lib/prepzo-bot-stack.ts
+          echo '      role,' >> lib/prepzo-bot-stack.ts
+          echo '      userData,' >> lib/prepzo-bot-stack.ts
+          echo '      keyName: "${{ secrets.EC2_KEY_NAME }}",' >> lib/prepzo-bot-stack.ts
+          echo '    });' >> lib/prepzo-bot-stack.ts
+          echo '' >> lib/prepzo-bot-stack.ts
+          echo '    // Output the instance public IP' >> lib/prepzo-bot-stack.ts
+          echo '    new cdk.CfnOutput(this, "InstancePublicIP", {' >> lib/prepzo-bot-stack.ts
+          echo '      value: instance.instancePublicIp,' >> lib/prepzo-bot-stack.ts
+          echo '      description: "The public IP address of the Prepzo Bot instance",' >> lib/prepzo-bot-stack.ts
+          echo '      exportName: "PrepzoBotInstanceIP",' >> lib/prepzo-bot-stack.ts
+          echo '    });' >> lib/prepzo-bot-stack.ts
+          echo '  }' >> lib/prepzo-bot-stack.ts
+          echo '}' >> lib/prepzo-bot-stack.ts
 
           # Create the main entry point file
-          cat > bin/prepzo-bot.ts << 'EOL'
-#!/usr/bin/env node
-import 'source-map-support/register';
-import * as cdk from 'aws-cdk-lib';
-import { PrepzoBotStack } from '../lib/prepzo-bot-stack';
-
-const app = new cdk.App();
-new PrepzoBotStack(app, 'PrepzoBotStack', {
-  env: { 
-    account: process.env.CDK_DEFAULT_ACCOUNT, 
-    region: process.env.CDK_DEFAULT_REGION 
-  },
-});
-EOL
+          echo '#!/usr/bin/env node' > bin/prepzo-bot.ts
+          echo 'import "source-map-support/register";' >> bin/prepzo-bot.ts
+          echo 'import * as cdk from "aws-cdk-lib";' >> bin/prepzo-bot.ts
+          echo 'import { PrepzoBotStack } from "../lib/prepzo-bot-stack";' >> bin/prepzo-bot.ts
+          echo '' >> bin/prepzo-bot.ts
+          echo 'const app = new cdk.App();' >> bin/prepzo-bot.ts
+          echo 'new PrepzoBotStack(app, "PrepzoBotStack", {' >> bin/prepzo-bot.ts
+          echo '  env: {' >> bin/prepzo-bot.ts
+          echo '    account: process.env.CDK_DEFAULT_ACCOUNT,' >> bin/prepzo-bot.ts
+          echo '    region: process.env.CDK_DEFAULT_REGION' >> bin/prepzo-bot.ts
+          echo '  },' >> bin/prepzo-bot.ts
+          echo '});' >> bin/prepzo-bot.ts
 
           # Show the stack
           echo "Available stacks after creation:"
