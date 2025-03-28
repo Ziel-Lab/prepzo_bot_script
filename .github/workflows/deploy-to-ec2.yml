@@ -112,34 +112,42 @@ jobs:
           echo '' >> lib/prepzo-bot-stack.ts
           echo '    // Add managed policies to the role' >> lib/prepzo-bot-stack.ts
           echo '    role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonSSMManagedInstanceCore"));' >> lib/prepzo-bot-stack.ts
+          echo '    ' >> lib/prepzo-bot-stack.ts
+          echo '    // Add inline policy for Parameter Store access' >> lib/prepzo-bot-stack.ts
+          echo '    role.addToPolicy(new iam.PolicyStatement({' >> lib/prepzo-bot-stack.ts
+          echo '      actions: ["ssm:GetParameter*"],' >> lib/prepzo-bot-stack.ts
+          echo '      resources: ["arn:aws:ssm:*:*:parameter/prepzo-bot/*"],' >> lib/prepzo-bot-stack.ts
+          echo '    }));' >> lib/prepzo-bot-stack.ts
           echo '' >> lib/prepzo-bot-stack.ts
           echo '    // User data script for EC2 instance' >> lib/prepzo-bot-stack.ts
           echo '    const userData = ec2.UserData.forLinux();' >> lib/prepzo-bot-stack.ts
           echo '    // Prepare user data commands' >> lib/prepzo-bot-stack.ts
           echo '    const userDataCommands = `#!/bin/bash' >> lib/prepzo-bot-stack.ts
           echo 'yum update -y' >> lib/prepzo-bot-stack.ts
-          echo 'yum install -y git python3 python3-pip python3-venv nc curl systemd' >> lib/prepzo-bot-stack.ts
+          echo 'yum install -y git python3 python3-pip python3-venv nc curl systemd jq awscli' >> lib/prepzo-bot-stack.ts
           echo 'cd /home/ec2-user' >> lib/prepzo-bot-stack.ts
-          echo 'git clone https://github.com/${process.env.GITHUB_REPOSITORY || "${{ github.repository }}"}.git prepzo_bot' >> lib/prepzo-bot-stack.ts
+          echo 'git clone https://github.com/${{ github.repository }}.git prepzo_bot' >> lib/prepzo-bot-stack.ts
           echo 'chown -R ec2-user:ec2-user prepzo_bot' >> lib/prepzo-bot-stack.ts
           echo 'cd prepzo_bot' >> lib/prepzo-bot-stack.ts
           echo 'python3 -m venv venv' >> lib/prepzo-bot-stack.ts
           echo 'source venv/bin/activate' >> lib/prepzo-bot-stack.ts
           echo 'pip install -r requirements.txt || { echo "Error installing requirements"; cat requirements.txt; }' >> lib/prepzo-bot-stack.ts
-          echo 'pip install requests paramiko flask' >> lib/prepzo-bot-stack.ts
+          echo 'pip install requests paramiko flask awscli boto3' >> lib/prepzo-bot-stack.ts
           echo 'mkdir -p /home/ec2-user/.env' >> lib/prepzo-bot-stack.ts
+          
+          echo '# Fetch secrets from SSM Parameter Store' >> lib/prepzo-bot-stack.ts
           echo 'cat > /home/ec2-user/.env/prepzo_bot.env << EOF' >> lib/prepzo-bot-stack.ts
-          echo 'SUPABASE_URL=${process.env.SUPABASE_URL || ""}' >> lib/prepzo-bot-stack.ts
-          echo 'SUPABASE_SERVICE_ROLE_KEY=${process.env.SUPABASE_SERVICE_ROLE_KEY || ""}' >> lib/prepzo-bot-stack.ts
-          echo 'OPENAI_API_KEY=${process.env.OPENAI_API_KEY || ""}' >> lib/prepzo-bot-stack.ts
-          echo 'DEEPGRAM_API_KEY=${process.env.DEEPGRAM_API_KEY || ""}' >> lib/prepzo-bot-stack.ts
-          echo 'LIVEKIT_URL=${process.env.LIVEKIT_URL || ""}' >> lib/prepzo-bot-stack.ts
-          echo 'LIVEKIT_API_KEY=${process.env.LIVEKIT_API_KEY || ""}' >> lib/prepzo-bot-stack.ts
-          echo 'CARTESIA_API_KEY=${process.env.CARTESIA_API_KEY || ""}' >> lib/prepzo-bot-stack.ts
-          echo 'ELEVENLABS_API_KEY=${process.env.ELEVENLABS_API_KEY || ""}' >> lib/prepzo-bot-stack.ts
+          echo 'SUPABASE_URL=$(aws ssm get-parameter --name "/prepzo-bot/SUPABASE_URL" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
+          echo 'SUPABASE_SERVICE_ROLE_KEY=$(aws ssm get-parameter --name "/prepzo-bot/SUPABASE_SERVICE_ROLE_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
+          echo 'OPENAI_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/OPENAI_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
+          echo 'DEEPGRAM_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/DEEPGRAM_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
+          echo 'LIVEKIT_URL=$(aws ssm get-parameter --name "/prepzo-bot/LIVEKIT_URL" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
+          echo 'LIVEKIT_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/LIVEKIT_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
+          echo 'CARTESIA_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/CARTESIA_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
+          echo 'ELEVENLABS_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/ELEVENLABS_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
           echo 'HEALTH_CHECK_PORT=8080' >> lib/prepzo-bot-stack.ts
           echo 'ENVIRONMENT=production' >> lib/prepzo-bot-stack.ts
-          echo 'GIT_COMMIT=${process.env.GITHUB_SHA || ""}' >> lib/prepzo-bot-stack.ts
+          echo 'GIT_COMMIT=${{ github.sha }}' >> lib/prepzo-bot-stack.ts
           echo 'EOF' >> lib/prepzo-bot-stack.ts
           echo '' >> lib/prepzo-bot-stack.ts
           echo '# Create health server' >> lib/prepzo-bot-stack.ts
@@ -250,14 +258,17 @@ jobs:
             IMPORT_LINE="import { PrepzoBotStack } from '../lib/prepzo-bot-stack';"
             STACK_LINE="new PrepzoBotStack(app, 'PrepzoBotStack', { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION } });"
             
-            # Insert import after the first import line
-            grep -q "import " bin/infrastructure.ts && \
-              sed -i "0,/import /s/import /import / \n$IMPORT_LINE\nimport /" bin/infrastructure.ts || \
-              echo "No import lines found, adding at top" && \
-              sed -i "1s/^/$IMPORT_LINE\n/" bin/infrastructure.ts
+            # Use different approach to modify the file
+            echo "Adding import statement to infrastructure.ts"
+            echo -e "$IMPORT_LINE\n$(cat bin/infrastructure.ts)" > bin/infrastructure.ts.tmp
+            mv bin/infrastructure.ts.tmp bin/infrastructure.ts
             
-            # Insert stack instantiation before the last line
-            sed -i "$ i $STACK_LINE" bin/infrastructure.ts
+            # Insert stack instantiation at end but before the last line
+            echo "Adding stack instantiation to infrastructure.ts"
+            LAST_LINE=$(tail -n 1 bin/infrastructure.ts)
+            sed -i "$ d" bin/infrastructure.ts
+            echo "$STACK_LINE" >> bin/infrastructure.ts
+            echo "$LAST_LINE" >> bin/infrastructure.ts
             
             echo "Modified infrastructure.ts:"
             cat bin/infrastructure.ts
@@ -314,6 +325,18 @@ jobs:
             fi
           }
       
+      - name: Store secrets in AWS Parameter Store
+        run: |
+          echo "Storing secrets in AWS Parameter Store..."
+          aws ssm put-parameter --name "/prepzo-bot/SUPABASE_URL" --value "${{ secrets.SUPABASE_URL }}" --type SecureString --overwrite || echo "Warning: Failed to store SUPABASE_URL"
+          aws ssm put-parameter --name "/prepzo-bot/SUPABASE_SERVICE_ROLE_KEY" --value "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store SUPABASE_SERVICE_ROLE_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/OPENAI_API_KEY" --value "${{ secrets.OPENAI_API_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store OPENAI_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/DEEPGRAM_API_KEY" --value "${{ secrets.DEEPGRAM_API_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store DEEPGRAM_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/LIVEKIT_URL" --value "${{ secrets.LIVEKIT_URL }}" --type SecureString --overwrite || echo "Warning: Failed to store LIVEKIT_URL"
+          aws ssm put-parameter --name "/prepzo-bot/LIVEKIT_API_KEY" --value "${{ secrets.LIVEKIT_API_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store LIVEKIT_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/CARTESIA_API_KEY" --value "${{ secrets.CARTESIA_API_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store CARTESIA_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/ELEVENLABS_API_KEY" --value "${{ secrets.ELEVENLABS_API_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store ELEVENLABS_API_KEY"
+          
       - name: Deploy CDK Stack
         id: get-ip
         working-directory: ./infrastructure
