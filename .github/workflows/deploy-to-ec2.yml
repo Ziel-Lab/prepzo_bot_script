@@ -376,21 +376,6 @@ jobs:
         id: get-ip
         working-directory: ./infrastructure
         run: |
-          # Create a simple health check script for the EC2 instance
-          mkdir -p user-data
-          cat > user-data/health.sh << 'EOF'
-          #!/bin/bash
-          # Simple script to ensure port 80 always has a listener
-          yum install -y socat
-          nohup socat -v TCP-LISTEN:80,fork,reuseaddr,crlf 'SYSTEM:echo -e "HTTP/1.1 200 OK\nContent-Type: application/json\n\n{\"status\":\"ok\"}"' > /var/log/health-socat.log 2>&1 &
-          EOF
-          
-          # Add this to the stack user data
-          sed -i '/const userData = ec2.UserData.forLinux();/a userData.addCommands("curl -sSL -o /root/health.sh https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/user-data/health.sh\\nchmod +x /root/health.sh\\n/root/health.sh");' lib/prepzo-bot-stack.ts
-          
-          # Modify security group to explicitly allow all traffic
-          sed -i '/securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(8080)/a securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.allTcp(), "Allow all TCP traffic");' lib/prepzo-bot-stack.ts
-          
           # Debug CDK initialization
           echo "Created CDK project structure:"
           ls -la
