@@ -118,26 +118,7 @@ jobs:
           echo '    const userData = ec2.UserData.forLinux();' >> lib/prepzo-bot-stack.ts
           echo '    userData.addCommands(' >> lib/prepzo-bot-stack.ts
           echo '      "#!/bin/bash",' >> lib/prepzo-bot-stack.ts
-          echo '      "set -ex",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# IMMEDIATE PORT 80 LISTENER - starts before anything else",' >> lib/prepzo-bot-stack.ts
-          echo '      "yum update -y && yum install -y nc",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Create a simple TCP listener on port 80",' >> lib/prepzo-bot-stack.ts
-          echo '      "cat > /tmp/port80listener.sh << '\''EOF'\''",' >> lib/prepzo-bot-stack.ts
-          echo '      "#!/bin/bash",' >> lib/prepzo-bot-stack.ts
-          echo '      "while true; do",' >> lib/prepzo-bot-stack.ts
-          echo '      "  echo -e \"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n{\\\"status\\\":\\\"ok\\\"}\" | nc -l 80",' >> lib/prepzo-bot-stack.ts
-          echo '      "  echo \$(date) - \"Port 80 request served\" >> /tmp/health-check.log",' >> lib/prepzo-bot-stack.ts
-          echo '      "done",' >> lib/prepzo-bot-stack.ts
-          echo '      "EOF",' >> lib/prepzo-bot-stack.ts
-          echo '      "chmod +x /tmp/port80listener.sh",' >> lib/prepzo-bot-stack.ts
-          echo '      "nohup /tmp/port80listener.sh > /tmp/port80.log 2>&1 &",' >> lib/prepzo-bot-stack.ts
-          echo '      "echo \$(date) - \"Started port 80 listener\" >> /tmp/health-check.log",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
-          echo '      "# Open all ports in local iptables immediately",' >> lib/prepzo-bot-stack.ts
-          echo '      "iptables -P INPUT ACCEPT",' >> lib/prepzo-bot-stack.ts
-          echo '      "iptables -F",' >> lib/prepzo-bot-stack.ts
-          echo '      "",' >> lib/prepzo-bot-stack.ts
+          echo '      "set -e",' >> lib/prepzo-bot-stack.ts
           echo '      "# Update system and install dependencies",' >> lib/prepzo-bot-stack.ts
           echo '      "yum update -y",' >> lib/prepzo-bot-stack.ts
           echo '      "yum install -y git python3 python3-pip python3-venv jq htop tcpdump nc",' >> lib/prepzo-bot-stack.ts
@@ -498,114 +479,145 @@ jobs:
           echo "Instance IP: $INSTANCE_IP"
           echo "Waiting for deployment to complete and service to start..."
           
-          # First wait for SSH to be available (5 minutes max)
+          # First wait for SSH to be available (2 minutes max)
           echo "Waiting for SSH to become available..."
-          SSH_MAX_RETRIES=30
+          SSH_MAX_RETRIES=12
           for i in $(seq 1 $SSH_MAX_RETRIES); do
             echo "SSH connection attempt $i of $SSH_MAX_RETRIES..."
-            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/ec2_key ec2-user@$INSTANCE_IP "echo SSH connection successful"; then
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/ec2_key ec2-user@$INSTANCE_IP "echo SSH connection successful"; then
               echo "✅ SSH connection established!"
               break
             fi
             
             if [ $i -eq $SSH_MAX_RETRIES ]; then
-              echo "⚠️ Could not establish SSH connection after 5 minutes."
-              echo "Checking instance status via AWS CLI..."
-              aws ec2 describe-instance-status --instance-ids $(aws ec2 describe-instances --filter Name=ip-address,Values=$INSTANCE_IP --query "Reservations[0].Instances[0].InstanceId" --output text)
-              echo "Will try to continue with TCP health checks anyway..."
+              echo "⚠️ Could not establish SSH connection after 2 minutes."
+              echo "Instance might still be initializing. Will continue with health checks."
             fi
             
-            # Try to ping and check basic network connectivity
-            echo "Basic network connectivity test:"
-            ping -c 3 $INSTANCE_IP || echo "Ping failed - this may be expected if ICMP is blocked"
-            
-            echo "Checking TCP port accessibility with telnet/nc..."
-            timeout 5 nc -zv $INSTANCE_IP 80 || echo "Port 80 not accessible yet"
-            timeout 5 nc -zv $INSTANCE_IP 22 || echo "Port 22 (SSH) not accessible yet"
-            
-            echo "Waiting for SSH to become available... (10 seconds)"
-            sleep 10
+            echo "Waiting for SSH to become available... (5 seconds)"
+            sleep 5
           done
           
           # Now wait for health check to respond
           MAX_RETRIES=60
           RETRY_INTERVAL=15
           
-          # Use curl with verbose output to better diagnose connection issues
           for i in $(seq 1 $MAX_RETRIES); do
             echo "Attempt $i of $MAX_RETRIES to connect to health endpoint..."
             
-            # Try both ports for the health check with verbose output to see where it's failing
-            echo "Trying port 80..."
-            timeout 10 curl -v http://$INSTANCE_IP/ || echo "Port 80 connection failed"
+            # Try both ports for the health check
+            HTTP_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://$INSTANCE_IP/health || echo "error")
+            HEALTH_PORT_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://$INSTANCE_IP:8080/health || echo "error")
             
-            HTTP_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 http://$INSTANCE_IP/ || echo "000error")
-            
-            if [ "$HTTP_RESPONSE" == "200" ]; then
-              echo "✅ Health check endpoint is responding on port 80! Service is running."
+            if [ "$HTTP_RESPONSE" == "200" ] || [ "$HEALTH_PORT_RESPONSE" == "200" ]; then
+              echo "✅ Health check endpoint is responding! Service is running."
               echo "Deployment successful."
               
               # Try to get actual health check content
               echo "Health check response content:"
-              curl -s http://$INSTANCE_IP/ || echo "Could not get health check content"
+              curl -s http://$INSTANCE_IP/health || curl -s http://$INSTANCE_IP:8080/health || echo "Could not get health check content"
               
               exit 0
             fi
             
-            # If we reach the 10th attempt and still no success, try to get more diagnostics via SSH if possible
-            if [ $((i % 5)) -eq 0 ] || [ $i -eq 10 ] || [ $i -eq 20 ]; then
-              echo "======== DETAILED DIAGNOSTICS AT ATTEMPT $i ========"
-              # Try to SSH in and check the status
+            echo "Service not ready yet. HTTP response: $HTTP_RESPONSE, Port 8080 response: $HEALTH_PORT_RESPONSE"
+            
+            # Try to run diagnostics every 5 attempts
+            if [ $((i % 5)) -eq 0 ]; then
+              echo "Running diagnostics on attempt $i..."
               ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/ec2_key ec2-user@$INSTANCE_IP 'bash -s' << 'EOF' || echo "Could not connect via SSH for diagnostics"
-              echo "==== BASIC SYSTEM STATUS ===="
-              uptime
-              hostname
-              
-              echo "==== NETWORK INTERFACE STATUS ===="
-              ip addr
-              ip route
-              
-              echo "==== FIREWALL/IPTABLES STATUS ===="
-              sudo iptables -L -v
-              sudo iptables -t nat -L -v
-              
-              echo "==== CHECKING LISTENER PROCESSES ===="
-              ps aux | grep -E '[n]c|[s]ocat|[l]isten|[p]ort'
-              sudo netstat -tulpn | grep -E ':(80|8080)'
-              
-              echo "==== CHECKING BOOT LOGS ===="
-              sudo journalctl -b | tail -50
-              
-              echo "==== HEALTH CHECK FILES ===="
-              ls -la /tmp/port80*
-              cat /tmp/health-check.log 2>/dev/null || echo "No health check log found"
-              
-              echo "==== TRYING LOCAL CONNECTION ===="
-              curl -v localhost:80 2>&1 || echo "Local connection to port 80 failed"
-              
-              echo "==== MANUAL HEALTH CHECK SETUP ===="
-              # Ensure we have a basic listener on port 80
-              if ! sudo netstat -tulpn | grep ':80'; then
-                echo "No listener found on port 80. Setting up a basic one..."
-                echo -e "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}" | sudo nc -l 80 &
-                
-                # If that fails, try with socat
-                if [ $? -ne 0 ]; then
-                  echo "nc failed, trying with socat..."
-                  sudo yum install -y socat || true
-                  # Create a response file first
-                  echo -e 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{"status":"ok"}' | sudo tee /tmp/http_response.txt
-                  # Use the file with socat to avoid quote issues
-                  sudo bash -c "nohup socat TCP-LISTEN:80,fork,reuseaddr SYSTEM:'cat /tmp/http_response.txt' > /tmp/socat.log 2>&1 &"
-                fi
+              echo "==== Instance Initialization Status ===="
+              if [ -f /var/tmp/setup_complete ]; then
+                echo "✅ Setup script has completed"
+              else
+                echo "⚠️ Setup script has not completed yet"
+                echo "Checking cloud-init status:"
+                sudo cat /var/log/cloud-init-output.log | tail -n 50 || echo "Could not read cloud-init log"
               fi
+              
+              echo "==== Service Status ===="
+              sudo systemctl status health-check || true
+              sudo systemctl status prepzo-bot || true
+              
+              echo "==== Network Configuration ===="
+              sudo iptables -t nat -L -n -v
+              sudo netstat -tulpn | grep -E '(8080|80)'
+              
+              echo "==== Checking Health Endpoint Locally ===="
+              curl -v localhost:8080/health 2>&1 || echo "Could not connect to local health endpoint"
+              
+              echo "==== Service Logs ===="
+              sudo journalctl -u health-check -n 20 --no-pager || true
+              
+              echo "==== User Data Script Execution Status ===="
+              ps aux | grep python || true
+              ls -la /home/ec2-user/prepzo_bot/
 EOF
             fi
             
-            echo "Service not ready yet. HTTP response: $HTTP_RESPONSE"
             echo "Waiting $RETRY_INTERVAL seconds before next attempt..."
             sleep $RETRY_INTERVAL
           done
+          
+          echo "❌ Deployment verification timed out after 15 minutes"
+          echo "Running final diagnostics and collecting logs..."
+          
+          # Final diagnostics - gather as much info as possible
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/ec2_key ec2-user@$INSTANCE_IP 'bash -s' << 'EOF' || echo "Could not connect via SSH for final diagnostics"
+          echo "==== FINAL DIAGNOSTICS REPORT ===="
+          echo "System uptime: $(uptime)"
+          echo "Memory usage:"
+          free -h
+          
+          echo "==== CLOUD INIT LOGS ===="
+          sudo cat /var/log/cloud-init-output.log | tail -n 100 || echo "Could not read cloud-init log"
+          
+          echo "==== INSTANCE SETUP STATUS ===="
+          if [ -f /var/tmp/setup_complete ]; then
+            echo "✅ Setup script completed at: $(stat -c %y /var/tmp/setup_complete)"
+          else
+            echo "⚠️ Setup script has not completed yet"
+          fi
+          
+          echo "==== HEALTH CHECK STATUS ===="
+          if [ -f /home/ec2-user/prepzo_bot/health_server.py ]; then
+            echo "✅ Health check server file exists"
+            cat /home/ec2-user/prepzo_bot/health_server.py
+          else
+            echo "⚠️ Health check server file not found"
+          fi
+          
+          echo "==== MANUAL HEALTH CHECK SETUP ===="
+          echo "Attempting to manually start health check..."
+          cd /home/ec2-user/prepzo_bot || exit 1
+          source venv/bin/activate || echo "Could not activate venv"
+          
+          # Create a temporary health check file if it doesn't exist
+          if [ ! -f health_server.py ]; then
+            echo "Creating temporary health check server..."
+            echo '
+import os
+from flask import Flask
+app = Flask(__name__)
+@app.route("/health")
+def health():
+    return "{\\"status\\":\\"ok\\"}"
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
+' > temp_health.py
+            
+            python temp_health.py &
+            echo "Started temporary health server, waiting 5 seconds..."
+            sleep 5
+            curl -v localhost:8080/health || echo "Still cannot connect to health endpoint"
+          fi
+EOF
+          
+          echo "Deployment might still be in progress. You can check the status later by SSH into the instance."
+          echo "Instance IP: $INSTANCE_IP"
+          echo "SSH command: ssh -i your_key.pem ec2-user@$INSTANCE_IP"
+          echo "After SSH, run: sudo bash /home/ec2-user/diagnose.sh"
+          exit 1
       
       - name: Notify deployment status
         if: always()
