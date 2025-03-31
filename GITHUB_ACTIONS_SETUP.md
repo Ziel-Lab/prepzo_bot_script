@@ -41,7 +41,7 @@ Add the following secrets to your GitHub repository:
 1. `AWS_ACCESS_KEY_ID`: Access key for the `github_deployment` IAM user
 2. `AWS_SECRET_ACCESS_KEY`: Secret key for the `github_deployment` IAM user
 3. `AWS_REGION`: Set to `eu-north-1` for Stockholm
-4. `EC2_KEY_NAME`: The name of your EC2 key pair for SSH access
+4. `EC2_EC2_KEY_NAME`: The name of your EC2 key pair for SSH access
 
 ### Application Secrets
 5. `SUPABASE_URL`: Your Supabase project URL
