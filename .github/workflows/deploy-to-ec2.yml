@@ -128,9 +128,9 @@ jobs:
             SG_ID=$(aws ec2 create-security-group --group-name ${SG_NAME} --description "Security group for Prepzo Bot" --vpc-id ${VPC_ID} --query "GroupId" --output text)
             
             # Add inbound rules
-            aws ec2 authorize-security-group-ingress --group-id ${SG_ID} --protocol tcp --port 22 --cidr 0.0.0.0/0 --description "SSH access"
-            aws ec2 authorize-security-group-ingress --group-id ${SG_ID} --protocol tcp --port 80 --cidr 0.0.0.0/0 --description "HTTP access"
-            aws ec2 authorize-security-group-ingress --group-id ${SG_ID} --protocol tcp --port 8080 --cidr 0.0.0.0/0 --description "Health check access"
+            aws ec2 authorize-security-group-ingress --group-id ${SG_ID} --protocol tcp --port 22 --cidr 0.0.0.0/0
+            aws ec2 authorize-security-group-ingress --group-id ${SG_ID} --protocol tcp --port 80 --cidr 0.0.0.0/0
+            aws ec2 authorize-security-group-ingress --group-id ${SG_ID} --protocol tcp --port 8080 --cidr 0.0.0.0/0
             
             echo "Security group created with ID: ${SG_ID}"
           else
