@@ -386,15 +386,28 @@ jobs:
           
           ROLE_ARN=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text)
           
-          # Create deployment group using the instance name tag
-          echo "Creating deployment group with EC2 instance tag Name=bot_script_main"
+          # Use the most reliable approach to target EC2 instances for CodeDeploy
+          echo "Creating deployment group targeting EC2 instance directly"
           
+          INSTANCE_ID="i-0cfb0559a2ce347e6"  # Hardcoded instance ID
+          
+          # Print EC2 instance info for debugging
+          echo "Getting EC2 instance details for ${INSTANCE_ID}..."
+          aws ec2 describe-instances --instance-ids ${INSTANCE_ID} --query "Reservations[0].Instances[0].[InstanceId,State.Name,Tags[?Key=='Name'].Value|[0]]" --output text || echo "Could not find instance"
+          
+          # Create deployment group using the correct format for instance targeting
+          echo "Creating deployment group with instance ID ${INSTANCE_ID}"
+          
+          # Create a temporary tag for the specific instance if needed
+          aws ec2 create-tags --resources ${INSTANCE_ID} --tags Key=CodeDeployInstance,Value=PrepzoBot || echo "Failed to tag instance"
+          
+          # Use a more reliable syntax for deployment group creation
           aws deploy create-deployment-group \
             --application-name ${APP_NAME} \
             --deployment-group-name ${DEPLOY_GROUP} \
             --deployment-config-name CodeDeployDefault.AllAtOnce \
-            --ec2-tag-filters Key=Name,Value=bot_script_main,Type=KEY_AND_VALUE \
-            --service-role-arn ${ROLE_ARN}
+            --service-role-arn ${ROLE_ARN} \
+            --ec2-tag-filters Key=CodeDeployInstance,Value=PrepzoBot,Type=KEY_AND_VALUE
             
           echo "CodeDeploy deployment group created with role ARN: ${ROLE_ARN}"
 
