@@ -193,12 +193,9 @@ jobs:
               port = int(os.environ.get("HEALTH_CHECK_PORT", 8080))
               app.run(host="0.0.0.0", port=port)
           EOF
-          
-          # Reload systemd configuration
-          systemctl daemon-reload
           EOF
           
-          # Create systemd service files
+          # Create service files
           cat > $TEMP_DIR/etc/systemd/system/prepzo-health.service << 'EOF'
           [Unit]
           Description=Prepzo Health Check Service
@@ -236,6 +233,9 @@ jobs:
           cat > $TEMP_DIR/scripts/start_application.sh << 'EOF'
           #!/bin/bash
           echo "Starting application at $(date)"
+          
+          # Reload systemd to recognize new service files
+          systemctl daemon-reload
           
           # Start services
           systemctl enable prepzo-health
@@ -282,7 +282,8 @@ jobs:
           git rev-parse HEAD > $TEMP_DIR/GIT_COMMIT
           
           # Copy application files to deployment package
-          rsync -av --exclude={.git,.github,node_modules,infrastructure,cdk.out,.env} . $TEMP_DIR/ || {
+          echo "Copying application files to deployment package..."
+          rsync -a --exclude={.git,.github,node_modules,infrastructure,cdk.out,.env} . $TEMP_DIR/ || {
             echo "rsync failed, falling back to manual copy"
             find . -name "*.py" -type f -exec cp --parents {} $TEMP_DIR/ \;
             
@@ -292,7 +293,11 @@ jobs:
           }
           
           # Create ZIP archive
+          echo "Creating ZIP archive..."
           (cd $TEMP_DIR && zip -r ../prepzo-bot-deployment.zip .)
+          
+          # Verify the archive was created
+          ls -l prepzo-bot-deployment.zip
           echo "Deployment package created: prepzo-bot-deployment.zip"
 
       - name: Bootstrap CDK (if needed)
