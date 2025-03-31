@@ -502,24 +502,53 @@ jobs:
           #!/bin/bash
           set -x  # Enable debugging output
           
-          # Create virtual environment
+          # Install Python dependencies first
+          echo "Installing system dependencies..."
+          sudo yum update -y
+          sudo yum install -y python3-devel python3-pip gcc make git
+          
+          # Create working directory
           cd /home/ec2-user/prepzo_bot
-          python3 -m venv venv || python -m venv venv || echo "Could not create venv"
+          
+          # Fix permissions
+          sudo chown -R ec2-user:ec2-user /home/ec2-user/prepzo_bot
+          sudo chmod -R 755 /home/ec2-user/prepzo_bot
+          
+          # Create virtual environment with fallbacks
+          echo "Creating virtual environment..."
+          python3 -m venv venv || {
+            echo "Standard venv failed, trying with pip install..."
+            pip3 install --user virtualenv
+            python3 -m virtualenv venv
+          } || {
+            echo "Virtualenv also failed, trying system pip..."
+            mkdir -p venv/bin
+            ln -sf $(which python3) venv/bin/python
+            ln -sf $(which pip3) venv/bin/pip
+          }
           
           # Activate virtual environment
-          source venv/bin/activate
+          source venv/bin/activate || {
+            echo "Could not activate venv, using system Python"
+            export PATH=$PWD/venv/bin:$PATH
+          }
           
           # Install dependencies with better error handling
           if [ -f requirements.txt ]; then
             echo "Installing packages from requirements.txt..."
-            pip install --upgrade pip
-            pip install -r requirements.txt || pip install --no-cache-dir -r requirements.txt || {
-              echo "Failed to install from requirements.txt, installing critical packages individually"
-              pip install flask boto3 requests
-            }
+            pip install --upgrade pip || sudo pip3 install --upgrade pip
+            
+            # Install packages one by one to avoid failing on a single package
+            cat requirements.txt | while read requirement || [[ -n $requirement ]];
+            do
+              if [[ ! -z $requirement && $requirement != \#* ]]; then
+                echo "Installing $requirement..."
+                pip install $requirement || pip install --no-cache-dir $requirement || echo "Failed to install $requirement, continuing..."
+              fi
+            done
           else
             echo "No requirements.txt found, installing critical packages individually"
-            pip install flask boto3 requests
+            pip install flask boto3 requests || pip install --no-cache-dir flask boto3 requests
           fi
           
           # Make scripts executable
@@ -544,17 +573,43 @@ jobs:
           ELEVENLABS_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/ELEVENLABS_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
           ENV_EOF
           
+          # Set environment variables now for testing
+          set -a
+          source /home/ec2-user/.env/prepzo_bot.env
+          set +a
+          
           # Test running main.py directly before setting up services
           echo "Testing main.py execution..."
           cd /home/ec2-user/prepzo_bot
-          source venv/bin/activate
-          python main.py || echo "Warning: main.py failed on test execution, will try with service"
+          if [ -f venv/bin/activate ]; then
+            source venv/bin/activate
+          fi
+          
+          echo "Testing with 'start' argument..."
+          python3 main.py start &
+          PID=$!
+          sleep 5
+          kill $PID || true
+          
+          echo "Testing with 'dev' argument..."
+          python3 main.py dev || echo "Dev mode might not be supported yet"
           
           # Start services
           sudo systemctl enable prepzo-health
           sudo systemctl start prepzo-health
           sudo systemctl enable prepzo-bot
-          sudo systemctl start prepzo-bot
+          sudo systemctl start prepzo-bot || {
+            echo "Service startup failed, checking Python version and path:"
+            which python3
+            python3 --version
+            which pip3
+            pip3 --version
+            echo "Checking main.py existence and permissions:"
+            ls -la main.py
+            echo "Trying to run main.py directly:"
+            cd /home/ec2-user/prepzo_bot
+            python3 main.py start
+          }
           
           # Set up port forwarding
           sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080 || echo "Failed to set up port forwarding"
@@ -600,6 +655,22 @@ jobs:
           )
           logger = logging.getLogger("prepzo-bot")
           
+          def run_dev_mode():
+              """Run in development mode with more debugging"""
+              logger.setLevel(logging.DEBUG)
+              logger.debug("Starting bot in DEV mode...")
+              logger.debug("Environment variables:")
+              for key, value in os.environ.items():
+                  if not any(secret in key.lower() for secret in ['key', 'secret', 'token', 'password']):
+                      logger.debug(f"  {key}: {value}")
+                  else:
+                      logger.debug(f"  {key}: ***REDACTED***")
+              
+              # Run dev mode loop
+              while True:
+                  logger.debug("Bot running in DEV mode...")
+                  time.sleep(30)  # Shorter interval for dev mode
+          
           def main():
               try:
                   logger.info("Bot starting...")
@@ -625,14 +696,22 @@ jobs:
           
           if __name__ == "__main__":
               try:
-                  if len(sys.argv) > 1 and sys.argv[1] == "start":
-                      exit_code = main()
-                      if exit_code:
-                          logger.warning(f"Main function returned exit code {exit_code}, restarting...")
-                          time.sleep(5)
-                          sys.exit(exit_code)
+                  if len(sys.argv) > 1:
+                      if sys.argv[1] == "start":
+                          exit_code = main()
+                          if exit_code:
+                              logger.warning(f"Main function returned exit code {exit_code}, restarting...")
+                              time.sleep(5)
+                              sys.exit(exit_code)
+                      elif sys.argv[1] == "dev":
+                          logger.info("Starting in development mode")
+                          run_dev_mode()
+                      else:
+                          logger.error(f"Unknown command: {sys.argv[1]}")
+                          logger.error("Usage: python main.py [start|dev]")
+                          sys.exit(1)
                   else:
-                      logger.error("Usage: python main.py start")
+                      logger.error("Usage: python main.py [start|dev]")
                       sys.exit(1)
               except Exception as e:
                   logger.critical(f"Unhandled exception: {e}")
@@ -661,6 +740,37 @@ jobs:
           EOF
           
           chmod +x $DEPLOY_DIR/run_bot.sh
+          
+          # Create a manual run script for dev mode
+          cat > $DEPLOY_DIR/run_dev.sh << 'EOF'
+          #!/bin/bash
+          set -x
+          
+          # Activate virtual environment with fallbacks
+          cd /home/ec2-user/prepzo_bot
+          
+          if [ -f venv/bin/activate ]; then
+            source venv/bin/activate
+          else
+            echo "No virtual environment found, using system Python"
+            export PATH=/home/ec2-user/prepzo_bot/venv/bin:$PATH
+          fi
+          
+          # Load environment variables
+          set -a
+          source /home/ec2-user/.env/prepzo_bot.env
+          set +a
+          
+          # Make sure we have the latest pip and key packages
+          pip install --upgrade pip || sudo pip3 install --upgrade pip
+          pip install flask requests boto3 || sudo pip3 install flask requests boto3
+          
+          # Run the bot in dev mode
+          echo "Starting bot in dev mode..."
+          python3 main.py dev
+          EOF
+          
+          chmod +x $DEPLOY_DIR/run_dev.sh
           
           echo "Transferring files to EC2 instance..."
           scp -r $DEPLOY_DIR/* ec2-user@$INSTANCE_IP:/home/ec2-user/prepzo_bot/
