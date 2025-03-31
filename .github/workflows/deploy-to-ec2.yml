@@ -315,7 +315,8 @@ jobs:
 
       - name: Create S3 bucket for deployment artifacts
         run: |
-          BUCKET_NAME="prepzo-bot-deployment-$(echo ${{ github.repository }} | tr '/' '-')"
+          # Generate a valid S3 bucket name (lowercase, no underscores)
+          BUCKET_NAME="prepzo-bot-deployment-$(echo ${{ github.repository }} | tr '/' '-' | tr '_' '-' | tr '[:upper:]' '[:lower:]')"
           
           # Check if bucket exists
           BUCKET_EXISTS=$(aws s3api list-buckets --query "Buckets[?Name=='${BUCKET_NAME}'].Name" --output text)
@@ -416,7 +417,8 @@ jobs:
       - name: Upload deployment package to S3
         run: |
           GIT_COMMIT=$(git rev-parse HEAD)
-          BUCKET_NAME="prepzo-bot-deployment-$(echo ${{ github.repository }} | tr '/' '-')"
+          # Use the same bucket name format
+          BUCKET_NAME="prepzo-bot-deployment-$(echo ${{ github.repository }} | tr '/' '-' | tr '_' '-' | tr '[:upper:]' '[:lower:]')"
           S3_LOCATION="s3://${BUCKET_NAME}/${GIT_COMMIT}.zip"
           
           echo "Uploading deployment package to ${S3_LOCATION}..."
@@ -425,7 +427,8 @@ jobs:
       - name: Deploy with CodeDeploy
         run: |
           GIT_COMMIT=$(git rev-parse HEAD)
-          BUCKET_NAME="prepzo-bot-deployment-$(echo ${{ github.repository }} | tr '/' '-')"
+          # Use the same bucket name format
+          BUCKET_NAME="prepzo-bot-deployment-$(echo ${{ github.repository }} | tr '/' '-' | tr '_' '-' | tr '[:upper:]' '[:lower:]')"
           
           echo "Creating deployment with CodeDeploy..."
           DEPLOYMENT_ID=$(aws deploy create-deployment \
