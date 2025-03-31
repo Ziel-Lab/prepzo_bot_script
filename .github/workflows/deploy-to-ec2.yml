@@ -69,6 +69,147 @@ jobs:
           
           echo "Secrets stored in AWS Parameter Store"
 
+      - name: Create EC2 Instance Role
+        run: |
+          # Create IAM role for EC2 instance
+          INSTANCE_ROLE_NAME="PrepzoBotEC2Role"
+          
+          # Create trust policy for EC2
+          TRUST_POLICY='{
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "ec2.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          }'
+          
+          # Check if role exists
+          ROLE_EXISTS=$(aws iam get-role --role-name ${INSTANCE_ROLE_NAME} --query "Role.Arn" --output text 2>/dev/null || echo "")
+          
+          if [ -z "$ROLE_EXISTS" ]; then
+            echo "Creating EC2 instance role: ${INSTANCE_ROLE_NAME}"
+            aws iam create-role --role-name ${INSTANCE_ROLE_NAME} --assume-role-policy-document "$TRUST_POLICY"
+            
+            # Attach required policies for the EC2 instance
+            aws iam attach-role-policy --role-name ${INSTANCE_ROLE_NAME} --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+            aws iam attach-role-policy --role-name ${INSTANCE_ROLE_NAME} --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+            
+            # Create instance profile
+            aws iam create-instance-profile --instance-profile-name ${INSTANCE_ROLE_NAME}
+            aws iam add-role-to-instance-profile --instance-profile-name ${INSTANCE_ROLE_NAME} --role-name ${INSTANCE_ROLE_NAME}
+            
+            # Wait for profile to be ready
+            echo "Waiting for instance profile to be ready..."
+            sleep 15
+          else
+            echo "EC2 instance role ${INSTANCE_ROLE_NAME} already exists"
+          fi
+          
+          INSTANCE_PROFILE_ARN=$(aws iam get-instance-profile --instance-profile-name ${INSTANCE_ROLE_NAME} --query "InstanceProfile.Arn" --output text)
+          echo "Instance profile ARN: ${INSTANCE_PROFILE_ARN}"
+
+      - name: Create Security Group
+        run: |
+          # Create security group for the EC2 instance
+          SG_NAME="PrepzoBotSecurityGroup"
+          
+          # Check if security group exists
+          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=${SG_NAME}" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null)
+          
+          if [ "$SG_ID" == "None" ] || [ -z "$SG_ID" ]; then
+            echo "Creating security group: ${SG_NAME}"
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --output text)
+            
+            SG_ID=$(aws ec2 create-security-group --group-name ${SG_NAME} --description "Security group for Prepzo Bot" --vpc-id ${VPC_ID} --query "GroupId" --output text)
+            
+            # Add inbound rules
+            aws ec2 authorize-security-group-ingress --group-id ${SG_ID} --protocol tcp --port 22 --cidr 0.0.0.0/0 --description "SSH access"
+            aws ec2 authorize-security-group-ingress --group-id ${SG_ID} --protocol tcp --port 80 --cidr 0.0.0.0/0 --description "HTTP access"
+            aws ec2 authorize-security-group-ingress --group-id ${SG_ID} --protocol tcp --port 8080 --cidr 0.0.0.0/0 --description "Health check access"
+            
+            echo "Security group created with ID: ${SG_ID}"
+          else
+            echo "Security group ${SG_NAME} already exists with ID: ${SG_ID}"
+          fi
+
+      - name: Create and Configure EC2 Instance
+        id: create_instance
+        run: |
+          # Use Amazon Linux 2 AMI (this is eu-north-1 region's AL2 AMI)
+          AMI_ID="ami-0efb5070c4c1c3b17"
+          INSTANCE_TYPE="t3.small"
+          EC2_KEY_NAME="prepzo-bot-key" # This should be a key pair that exists in your account
+          
+          # User data script to install CodeDeploy agent
+          USER_DATA=$(cat <<'EOF'
+          #!/bin/bash
+          # Update system
+          yum update -y
+          
+          # Install CodeDeploy agent
+          yum install -y ruby wget
+          cd /home/ec2-user
+          wget https://aws-codedeploy-eu-north-1.s3.eu-north-1.amazonaws.com/latest/install
+          chmod +x ./install
+          ./install auto
+          service codedeploy-agent start
+          chkconfig codedeploy-agent on
+          
+          # Install Amazon SSM agent (usually pre-installed, but just in case)
+          yum install -y amazon-ssm-agent
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+          
+          # Create working directories
+          mkdir -p /home/ec2-user/prepzo_bot
+          mkdir -p /home/ec2-user/.env
+          chown -R ec2-user:ec2-user /home/ec2-user/prepzo_bot
+          chown -R ec2-user:ec2-user /home/ec2-user/.env
+          
+          # Install Python 3
+          yum install -y python3 python3-pip
+          EOF
+          )
+          
+          # Convert to base64 for AWS EC2 run-instances
+          USER_DATA_B64=$(echo "$USER_DATA" | base64 -w 0)
+          
+          # Get security group ID
+          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=PrepzoBotSecurityGroup" --query "SecurityGroups[0].GroupId" --output text)
+          
+          echo "Launching new EC2 instance..."
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id ${AMI_ID} \
+            --instance-type ${INSTANCE_TYPE} \
+            --key-name ${EC2_KEY_NAME} \
+            --security-group-ids ${SG_ID} \
+            --user-data "$(echo "$USER_DATA" | base64 -w 0)" \
+            --iam-instance-profile Name=PrepzoBotEC2Role \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=PrepzoBotInstance}]" \
+            --query "Instances[0].InstanceId" \
+            --output text)
+            
+          echo "New instance created with ID: ${INSTANCE_ID}"
+          echo "instance_id=${INSTANCE_ID}" >> $GITHUB_OUTPUT
+          
+          # Wait for instance to become running
+          echo "Waiting for instance to be in running state..."
+          aws ec2 wait instance-running --instance-ids ${INSTANCE_ID}
+          
+          # Wait for instance status checks to pass
+          echo "Waiting for instance status checks to pass (this can take a few minutes)..."
+          aws ec2 wait instance-status-ok --instance-ids ${INSTANCE_ID}
+          
+          # Get instance public IP
+          INSTANCE_IP=$(aws ec2 describe-instances --instance-ids ${INSTANCE_ID} --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          echo "New instance public IP: ${INSTANCE_IP}"
+          echo "instance_ip=${INSTANCE_IP}" >> $GITHUB_OUTPUT
+
       - name: Fix script line endings and permissions
         run: |
           # Fix line endings (convert CRLF to LF)
@@ -399,19 +540,11 @@ jobs:
           ROLE_ARN=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text)
           
           # Use the most reliable approach to target EC2 instances for CodeDeploy
-          echo "Creating deployment group targeting EC2 instance directly"
-          
-          INSTANCE_ID="i-0cfb0559a2ce347e6"  # Hardcoded instance ID
-          
-          # Print EC2 instance info for debugging
-          echo "Getting EC2 instance details for ${INSTANCE_ID}..."
-          aws ec2 describe-instances --instance-ids ${INSTANCE_ID} --query "Reservations[0].Instances[0].[InstanceId,State.Name,Tags[?Key=='Name'].Value|[0]]" --output text || echo "Could not find instance"
+          INSTANCE_ID="${{ steps.create_instance.outputs.instance_id }}"
+          echo "Creating deployment group targeting new EC2 instance ${INSTANCE_ID}"
           
           # Create deployment group using the correct format for instance targeting
-          echo "Creating deployment group with instance ID ${INSTANCE_ID}"
-          
-          # Create a temporary tag for the specific instance if needed
-          aws ec2 create-tags --resources ${INSTANCE_ID} --tags Key=CodeDeployInstance,Value=PrepzoBot || echo "Failed to tag instance"
+          echo "Creating deployment group with instance tag Name=PrepzoBotInstance"
           
           # Use a more reliable syntax for deployment group creation
           aws deploy create-deployment-group \
@@ -419,7 +552,7 @@ jobs:
             --deployment-group-name ${DEPLOY_GROUP} \
             --deployment-config-name CodeDeployDefault.AllAtOnce \
             --service-role-arn ${ROLE_ARN} \
-            --ec2-tag-filters Key=CodeDeployInstance,Value=PrepzoBot,Type=KEY_AND_VALUE
+            --ec2-tag-filters Key=Name,Value=PrepzoBotInstance,Type=KEY_AND_VALUE
             
           echo "CodeDeploy deployment group created with role ARN: ${ROLE_ARN}"
 
@@ -479,10 +612,8 @@ jobs:
 
       - name: Verify deployment
         run: |
-          # Get instance IP for the specific instance
-          INSTANCE_IP=$(aws ec2 describe-instances \
-            --instance-ids i-0cfb0559a2ce347e6 \
-            --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          # Get instance IP from previous step
+          INSTANCE_IP="${{ steps.create_instance.outputs.instance_ip }}"
           
           if [ -z "$INSTANCE_IP" ] || [ "$INSTANCE_IP" == "None" ]; then
             echo "Error: Could not find instance IP"
@@ -492,4 +623,12 @@ jobs:
           echo "Instance IP: $INSTANCE_IP"
           
           # Run the deployment check script
-          python scripts/check_deployment.py --ip $INSTANCE_IP --app PrepzoBotApplication --group PrepzoBotDeploymentGroup 
+          python scripts/check_deployment.py --ip $INSTANCE_IP --app PrepzoBotApplication --group PrepzoBotDeploymentGroup
+          
+          echo "===================================================================="
+          echo "🚀 YOUR NEW INSTANCE IS READY!"
+          echo "===================================================================="
+          echo "Instance ID: ${{ steps.create_instance.outputs.instance_id }}"
+          echo "Public IP: $INSTANCE_IP"
+          echo "Health check URL: http://$INSTANCE_IP:8080/health"
+          echo "====================================================================" 
