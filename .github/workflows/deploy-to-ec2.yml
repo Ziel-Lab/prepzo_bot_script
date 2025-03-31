@@ -416,10 +416,13 @@ jobs:
           After=network.target
           
           [Service]
+          Type=simple
           User=ec2-user
           WorkingDirectory=/home/ec2-user/prepzo_bot
           EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env
-          ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python main.py start
+          ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python3 main.py start
+          StandardOutput=journal
+          StandardError=journal
           Restart=always
           RestartSec=10
           
@@ -497,7 +500,7 @@ jobs:
           # Create deployment script
           cat > $DEPLOY_DIR/deploy.sh << 'EOF'
           #!/bin/bash
-          set -x
+          set -x  # Enable debugging output
           
           # Create virtual environment
           cd /home/ec2-user/prepzo_bot
@@ -506,13 +509,18 @@ jobs:
           # Activate virtual environment
           source venv/bin/activate
           
-          # Install dependencies
+          # Install dependencies with better error handling
           if [ -f requirements.txt ]; then
-            pip install -r requirements.txt || pip install --no-cache-dir -r requirements.txt || echo "Failed to install requirements"
+            echo "Installing packages from requirements.txt..."
+            pip install --upgrade pip
+            pip install -r requirements.txt || pip install --no-cache-dir -r requirements.txt || {
+              echo "Failed to install from requirements.txt, installing critical packages individually"
+              pip install flask boto3 requests
+            }
+          else
+            echo "No requirements.txt found, installing critical packages individually"
+            pip install flask boto3 requests
           fi
-          
-          # Install minimal dependencies
-          pip install flask || pip install --no-cache-dir flask || echo "Failed to install Flask"
           
           # Make scripts executable
           chmod +x *.py
@@ -536,6 +544,12 @@ jobs:
           ELEVENLABS_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/ELEVENLABS_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
           ENV_EOF
           
+          # Test running main.py directly before setting up services
+          echo "Testing main.py execution..."
+          cd /home/ec2-user/prepzo_bot
+          source venv/bin/activate
+          python main.py || echo "Warning: main.py failed on test execution, will try with service"
+          
           # Start services
           sudo systemctl enable prepzo-health
           sudo systemctl start prepzo-health
@@ -548,6 +562,10 @@ jobs:
           # Check service status
           sudo systemctl status prepzo-health || echo "Health service not started properly"
           sudo systemctl status prepzo-bot || echo "Bot service not started properly"
+          
+          # Check logs
+          echo "Bot service logs:"
+          sudo journalctl -u prepzo-bot -n 30 || echo "Could not retrieve bot logs"
           
           echo "Deployment completed at $(date)"
           EOF
@@ -622,6 +640,27 @@ jobs:
                   sys.exit(1)
           EOF
           fi
+          
+          # Create a manual run script
+          cat > $DEPLOY_DIR/run_bot.sh << 'EOF'
+          #!/bin/bash
+          set -x
+          
+          # Activate virtual environment
+          cd /home/ec2-user/prepzo_bot
+          source venv/bin/activate
+          
+          # Load environment variables
+          set -a
+          source /home/ec2-user/.env/prepzo_bot.env
+          set +a
+          
+          # Run the bot directly
+          echo "Starting bot directly..."
+          python3 main.py start
+          EOF
+          
+          chmod +x $DEPLOY_DIR/run_bot.sh
           
           echo "Transferring files to EC2 instance..."
           scp -r $DEPLOY_DIR/* ec2-user@$INSTANCE_IP:/home/ec2-user/prepzo_bot/
