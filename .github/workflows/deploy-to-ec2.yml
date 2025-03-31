@@ -216,7 +216,7 @@ jobs:
           
           # Verify the security group allows SSH connections
           echo "Verifying security group rules..."
-          aws ec2 describe-security-groups --group-ids ${SG_ID} --query "SecurityGroups[0].IpPermissions[?ToPort==22]"
+          aws ec2 describe-security-groups --group-ids ${SG_ID} --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`]"
           
           # Add a delay to ensure the instance is fully booted and SSH is available
           echo "Waiting 2 minutes for instance to fully initialize and SSH to become available..."
