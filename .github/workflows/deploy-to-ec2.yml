@@ -356,6 +356,12 @@ jobs:
               
               aws iam create-role --role-name CodeDeployServiceRole --assume-role-policy-document "$TRUST_POLICY"
               aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforAWSCodeDeploy
+              # Add EC2 permissions
+              aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess
+              
+              # Wait for role to propagate
+              echo "Waiting for role permissions to propagate..."
+              sleep 10
               
               ROLE_ARN=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text)
             fi
