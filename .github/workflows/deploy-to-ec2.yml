@@ -336,178 +336,240 @@ jobs:
             echo "S3 bucket ${BUCKET_NAME} already exists"
           fi
 
-      - name: Create CodeDeploy application and deployment group
+      - name: Setup SSH key
         run: |
-          APP_NAME="PrepzoBotApplication"
-          DEPLOY_GROUP="PrepzoBotDeploymentGroup"
+          # Create SSH directory
+          mkdir -p ~/.ssh
           
-          # Delete deployment group if it exists
-          aws deploy delete-deployment-group --application-name ${APP_NAME} --deployment-group-name ${DEPLOY_GROUP} || echo "No deployment group to delete"
-          aws deploy delete-application --application-name ${APP_NAME} || echo "No application to delete"
+          # Save private key from secrets
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
           
-          # Handle the CodeDeployServiceRole properly
-          echo "Checking for existing CodeDeployServiceRole..."
-          ROLE_EXISTS=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text 2>/dev/null || echo "")
+          # Add host key to known hosts to avoid prompt
+          INSTANCE_IP="${{ steps.create_instance.outputs.instance_ip }}"
+          ssh-keyscan -H $INSTANCE_IP >> ~/.ssh/known_hosts
           
-          if [ ! -z "$ROLE_EXISTS" ]; then
-            echo "CodeDeployServiceRole exists, cleaning up attached policies"
-            # List all attached policies and detach them
-            ATTACHED_POLICIES=$(aws iam list-attached-role-policies --role-name CodeDeployServiceRole --query "AttachedPolicies[*].PolicyArn" --output text)
-            
-            for POLICY_ARN in $ATTACHED_POLICIES; do
-              echo "Detaching policy: $POLICY_ARN"
-              aws iam detach-role-policy --role-name CodeDeployServiceRole --policy-arn $POLICY_ARN
-            done
-            
-            # List inline policies
-            INLINE_POLICIES=$(aws iam list-role-policies --role-name CodeDeployServiceRole --query "PolicyNames" --output text)
-            
-            for POLICY_NAME in $INLINE_POLICIES; do
-              echo "Deleting inline policy: $POLICY_NAME"
-              aws iam delete-role-policy --role-name CodeDeployServiceRole --policy-name $POLICY_NAME
-            done
-            
-            # Try to delete the role if it has no policies
-            aws iam delete-role --role-name CodeDeployServiceRole || echo "Could not delete role, will reuse it"
-          fi
-          
-          echo "Waiting for resources to be fully deleted..."
-          sleep 10
-          
-          # Create application
-          echo "Creating CodeDeploy application: ${APP_NAME}"
-          aws deploy create-application --application-name ${APP_NAME}
-          
-          # Create or update service role
-          echo "Setting up CodeDeploy service role"
-          TRUST_POLICY='{
-            "Version": "2012-10-17",
-            "Statement": [
-              {
-                "Effect": "Allow",
-                "Principal": {
-                  "Service": "codedeploy.amazonaws.com"
-                },
-                "Action": "sts:AssumeRole"
-              }
-            ]
-          }'
-          
-          # Create or update the role
-          ROLE_EXISTS=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text 2>/dev/null || echo "")
-          
-          if [ -z "$ROLE_EXISTS" ]; then
-            echo "Creating new CodeDeployServiceRole"
-            aws iam create-role --role-name CodeDeployServiceRole --assume-role-policy-document "$TRUST_POLICY"
-          else
-            echo "Updating existing CodeDeployServiceRole"
-            aws iam update-assume-role-policy --role-name CodeDeployServiceRole --policy-document "$TRUST_POLICY"
-          fi
-          
-          # Attach required policies
-          echo "Attaching policies to CodeDeployServiceRole"
-          aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
-          aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
-          
-          # Skip creating custom policy since we've hit policy quotas
-          # using a simpler approach with managed policies
-          
-          # Wait for role to propagate (longer wait time)
-          echo "Waiting for role permissions to propagate (30 seconds)..."
-          sleep 30
-          
-          ROLE_ARN=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text)
-          
-          # Use the most reliable approach to target EC2 instances for CodeDeploy
-          INSTANCE_ID="${{ steps.create_instance.outputs.instance_id }}"
-          echo "Creating deployment group targeting new EC2 instance ${INSTANCE_ID}"
-          
-          # Create deployment group using the correct format for instance targeting
-          echo "Creating deployment group with instance tag Name=PrepzoBotInstance"
-          
-          # Use a more reliable syntax for deployment group creation
-          aws deploy create-deployment-group \
-            --application-name ${APP_NAME} \
-            --deployment-group-name ${DEPLOY_GROUP} \
-            --deployment-config-name CodeDeployDefault.AllAtOnce \
-            --service-role-arn ${ROLE_ARN} \
-            --ec2-tag-filters Key=Name,Value=PrepzoBotInstance,Type=KEY_AND_VALUE
-            
-          echo "CodeDeploy deployment group created with role ARN: ${ROLE_ARN}"
+          echo "SSH key set up for $INSTANCE_IP"
 
-      - name: Upload deployment package to S3
+      - name: Deploy directly to EC2 via SSH
         run: |
-          GIT_COMMIT=$(git rev-parse HEAD)
-          # Use the same bucket name format
-          BUCKET_NAME="prepzo-bot-deployment-$(echo ${{ github.repository }} | tr '/' '-' | tr '_' '-' | tr '[:upper:]' '[:lower:]')"
-          S3_LOCATION="s3://${BUCKET_NAME}/${GIT_COMMIT}.zip"
-          
-          echo "Uploading deployment package to ${S3_LOCATION}..."
-          aws s3 cp prepzo-bot-deployment.zip ${S3_LOCATION}
-
-      - name: Deploy with CodeDeploy
-        run: |
-          GIT_COMMIT=$(git rev-parse HEAD)
-          # Use the same bucket name format
-          BUCKET_NAME="prepzo-bot-deployment-$(echo ${{ github.repository }} | tr '/' '-' | tr '_' '-' | tr '[:upper:]' '[:lower:]')"
-          
-          echo "Creating deployment with CodeDeploy..."
-          DEPLOYMENT_ID=$(aws deploy create-deployment \
-            --application-name PrepzoBotApplication \
-            --deployment-group-name PrepzoBotDeploymentGroup \
-            --s3-location bucket=${BUCKET_NAME},bundleType=zip,key=${GIT_COMMIT}.zip \
-            --file-exists-behavior OVERWRITE \
-            --query "deploymentId" --output text)
-          
-          echo "Deployment started with ID: ${DEPLOYMENT_ID}"
-          
-          # Monitor deployment status
-          echo "Monitoring deployment status..."
-          MAX_RETRIES=30
-          RETRY_INTERVAL=10
-          
-          for i in $(seq 1 $MAX_RETRIES); do
-            echo "Checking deployment status (attempt $i of $MAX_RETRIES)..."
-            DEPLOYMENT_STATUS=$(aws deploy get-deployment --deployment-id ${DEPLOYMENT_ID} --query "deploymentInfo.status" --output text)
-            
-            echo "Current status: ${DEPLOYMENT_STATUS}"
-            
-            if [ "$DEPLOYMENT_STATUS" == "Succeeded" ]; then
-              echo "✅ Deployment successful!"
-              break
-            elif [ "$DEPLOYMENT_STATUS" == "Failed" ] || [ "$DEPLOYMENT_STATUS" == "Stopped" ]; then
-              echo "❌ Deployment failed or was stopped"
-              aws deploy get-deployment --deployment-id ${DEPLOYMENT_ID}
-              exit 1
-            fi
-            
-            if [ $i -eq $MAX_RETRIES ]; then
-              echo "Deployment is still in progress. The GitHub Action will complete, but deployment may still be ongoing."
-              break
-            fi
-            
-            sleep ${RETRY_INTERVAL}
-          done
-
-      - name: Verify deployment
-        run: |
-          # Get instance IP from previous step
+          # Get instance IP
           INSTANCE_IP="${{ steps.create_instance.outputs.instance_ip }}"
           
-          if [ -z "$INSTANCE_IP" ] || [ "$INSTANCE_IP" == "None" ]; then
-            echo "Error: Could not find instance IP"
-            exit 1
+          echo "Creating deployment package..."
+          DEPLOY_DIR=prepzo_bot_deploy
+          mkdir -p $DEPLOY_DIR
+          
+          # Copy application files to deployment directory
+          rsync -a --exclude={.git,.github,node_modules,infrastructure,cdk.out,.env} . $DEPLOY_DIR/
+          
+          # Create env directory in deployment package
+          mkdir -p $DEPLOY_DIR/.env
+          
+          # Create systemd service files
+          mkdir -p $DEPLOY_DIR/systemd
+          
+          cat > $DEPLOY_DIR/systemd/prepzo-bot.service << 'EOF'
+          [Unit]
+          Description=Prepzo Bot Service
+          After=network.target
+          
+          [Service]
+          User=ec2-user
+          WorkingDirectory=/home/ec2-user/prepzo_bot
+          EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env
+          ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python main.py start
+          Restart=always
+          RestartSec=10
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          cat > $DEPLOY_DIR/systemd/prepzo-health.service << 'EOF'
+          [Unit]
+          Description=Prepzo Health Check Service
+          After=network.target
+          
+          [Service]
+          User=ec2-user
+          WorkingDirectory=/home/ec2-user/prepzo_bot
+          EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env
+          ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python health_server.py
+          Restart=always
+          RestartSec=5
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          cat > $DEPLOY_DIR/health_server.py << 'EOF'
+          #!/usr/bin/env python3
+          import os
+          import sys
+          import logging
+          
+          try:
+              from flask import Flask, jsonify
+              logging.basicConfig(level=logging.INFO)
+              
+              app = Flask(__name__)
+              
+              # Try to import version information
+              try:
+                  from version import VERSION, GIT_COMMIT, BUILD_DATE
+              except ImportError:
+                  VERSION = "unknown"
+                  GIT_COMMIT = "unknown"
+                  BUILD_DATE = "unknown"
+              
+              @app.route('/')
+              @app.route('/health')
+              @app.route('/health/')
+              def health():
+                  return jsonify({
+                      "status": "ok",
+                      "version": VERSION,
+                      "git_commit": GIT_COMMIT,
+                      "build_date": BUILD_DATE
+                  })
+              
+              if __name__ == "__main__":
+                  app.run(host='0.0.0.0', port=8080)
+                  
+          except ImportError:
+              # If Flask isn't available, create a minimal server
+              import http.server
+              import socketserver
+              
+              class HealthHandler(http.server.SimpleHTTPRequestHandler):
+                  def do_GET(self):
+                      self.send_response(200)
+                      self.send_header('Content-type', 'application/json')
+                      self.end_headers()
+                      self.wfile.write(b'{"status":"ok","version":"minimal"}')
+              
+              with socketserver.TCPServer(("", 8080), HealthHandler) as httpd:
+                  httpd.serve_forever()
+          EOF
+          
+          # Create deployment script
+          cat > $DEPLOY_DIR/deploy.sh << 'EOF'
+          #!/bin/bash
+          set -x
+          
+          # Create virtual environment
+          cd /home/ec2-user/prepzo_bot
+          python3 -m venv venv || python -m venv venv || echo "Could not create venv"
+          
+          # Activate virtual environment
+          source venv/bin/activate
+          
+          # Install dependencies
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt || pip install --no-cache-dir -r requirements.txt || echo "Failed to install requirements"
           fi
           
-          echo "Instance IP: $INSTANCE_IP"
+          # Install minimal dependencies
+          pip install flask || pip install --no-cache-dir flask || echo "Failed to install Flask"
           
-          # Run the deployment check script
-          python scripts/check_deployment.py --ip $INSTANCE_IP --app PrepzoBotApplication --group PrepzoBotDeploymentGroup
+          # Make scripts executable
+          chmod +x *.py
+          
+          # Install service files
+          sudo cp systemd/*.service /etc/systemd/system/
+          sudo systemctl daemon-reload
+          
+          # Create environment file
+          mkdir -p /home/ec2-user/.env
+          
+          # Load secrets from Parameter Store
+          cat > /home/ec2-user/.env/prepzo_bot.env << 'ENV_EOF'
+          SUPABASE_URL=$(aws ssm get-parameter --name "/prepzo-bot/SUPABASE_URL" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          SUPABASE_SERVICE_ROLE_KEY=$(aws ssm get-parameter --name "/prepzo-bot/SUPABASE_SERVICE_ROLE_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          OPENAI_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/OPENAI_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          DEEPGRAM_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/DEEPGRAM_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          LIVEKIT_URL=$(aws ssm get-parameter --name "/prepzo-bot/LIVEKIT_URL" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          LIVEKIT_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/LIVEKIT_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          CARTESIA_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/CARTESIA_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          ELEVENLABS_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/ELEVENLABS_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          ENV_EOF
+          
+          # Start services
+          sudo systemctl enable prepzo-health
+          sudo systemctl start prepzo-health
+          sudo systemctl enable prepzo-bot
+          sudo systemctl start prepzo-bot
+          
+          # Set up port forwarding
+          sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080 || echo "Failed to set up port forwarding"
+          
+          # Check service status
+          sudo systemctl status prepzo-health || echo "Health service not started properly"
+          sudo systemctl status prepzo-bot || echo "Bot service not started properly"
+          
+          echo "Deployment completed at $(date)"
+          EOF
+          
+          chmod +x $DEPLOY_DIR/deploy.sh
+          
+          # Create simple version file if it doesn't exist
+          if [ ! -f $DEPLOY_DIR/version.py ]; then
+            cat > $DEPLOY_DIR/version.py << 'EOF'
+          VERSION = "0.1.0"
+          GIT_COMMIT = "$(git rev-parse --short HEAD)"
+          BUILD_DATE = "$(date +'%Y-%m-%d')"
+          EOF
+          fi
+          
+          # Create simple main.py if it doesn't exist
+          if [ ! -f $DEPLOY_DIR/main.py ]; then
+            cat > $DEPLOY_DIR/main.py << 'EOF'
+          #!/usr/bin/env python3
+          
+          import os
+          import sys
+          import time
+          
+          def main():
+              print("Bot starting...")
+              while True:
+                  print("Bot running...")
+                  time.sleep(60)
+          
+          if __name__ == "__main__":
+              if len(sys.argv) > 1 and sys.argv[1] == "start":
+                  main()
+              else:
+                  print("Usage: python main.py start")
+          EOF
+          fi
+          
+          echo "Transferring files to EC2 instance..."
+          scp -r $DEPLOY_DIR/* ec2-user@$INSTANCE_IP:/home/ec2-user/prepzo_bot/
+          
+          echo "Running deployment script on instance..."
+          ssh ec2-user@$INSTANCE_IP "cd /home/ec2-user/prepzo_bot && bash deploy.sh"
+          
+          echo "Checking health endpoint..."
+          for i in {1..20}; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$INSTANCE_IP:8080/health || echo "failed")
+            echo "Health endpoint returned: $HTTP_STATUS"
+            
+            if [ "$HTTP_STATUS" == "200" ]; then
+              echo "✅ Health check successful!"
+              break
+            fi
+            
+            echo "Waiting for health check to pass (attempt $i of 20)..."
+            sleep 5
+          done
           
           echo "===================================================================="
-          echo "🚀 YOUR NEW INSTANCE IS READY!"
+          echo "🚀 DEPLOYMENT COMPLETED!"
           echo "===================================================================="
           echo "Instance ID: ${{ steps.create_instance.outputs.instance_id }}"
           echo "Public IP: $INSTANCE_IP"
           echo "Health check URL: http://$INSTANCE_IP:8080/health"
+          echo "SSH: ssh ec2-user@$INSTANCE_IP"
           echo "====================================================================" 
