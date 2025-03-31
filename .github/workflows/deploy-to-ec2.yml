@@ -294,10 +294,10 @@ jobs:
           
           # Create ZIP archive
           echo "Creating ZIP archive..."
-          (cd $TEMP_DIR && zip -r ../prepzo-bot-deployment.zip .)
+          (cd $TEMP_DIR && zip -r "$GITHUB_WORKSPACE/prepzo-bot-deployment.zip" .)
           
           # Verify the archive was created
-          ls -l prepzo-bot-deployment.zip
+          ls -l "$GITHUB_WORKSPACE/prepzo-bot-deployment.zip"
           echo "Deployment package created: prepzo-bot-deployment.zip"
 
       - name: Bootstrap CDK (if needed)
