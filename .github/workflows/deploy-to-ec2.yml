@@ -69,10 +69,24 @@ jobs:
           
           echo "Secrets stored in AWS Parameter Store"
 
+      - name: Fix script line endings and permissions
+        run: |
+          # Fix line endings (convert CRLF to LF)
+          sed -i 's/\r$//' scripts/deploy.sh
+          sed -i 's/\r$//' scripts/check_deployment.py
+          
+          # Make scripts executable
+          chmod +x scripts/deploy.sh
+          chmod +x scripts/check_deployment.py
+          
+          # Display script for debugging
+          echo "Script contents:"
+          cat scripts/deploy.sh | head -20
+
       - name: Create deployment package
         run: |
           # Run the deployment script to create the package
-          bash scripts/deploy.sh --force
+          sh scripts/deploy.sh --force
           
           # The script creates prepzo-bot-deployment.zip in the current directory
 
