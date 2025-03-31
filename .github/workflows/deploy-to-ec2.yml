@@ -94,7 +94,7 @@ jobs:
           mkdir -p $TEMP_DIR/etc/systemd/system
           
           # Create appspec.yml
-          cat > $TEMP_DIR/appspec.yml << 'EOF'
+          cat > $TEMP_DIR/appspec.yml << 'APPSPEC_EOF'
           version: 0.0
           os: linux
           files:
@@ -119,10 +119,10 @@ jobs:
               - location: scripts/validate_service.sh
                 timeout: 300
                 runas: root
-          EOF
+          APPSPEC_EOF
           
           # Create hooks scripts
-          cat > $TEMP_DIR/scripts/before_install.sh << 'EOF'
+          cat > $TEMP_DIR/scripts/before_install.sh << 'BEFORE_INSTALL_EOF'
           #!/bin/bash
           echo "Before installation steps starting at $(date)"
           
@@ -137,9 +137,9 @@ jobs:
           # Create directories if they don't exist
           mkdir -p /home/ec2-user/.env
           mkdir -p /home/ec2-user/prepzo_bot
-          EOF
+          BEFORE_INSTALL_EOF
           
-          cat > $TEMP_DIR/scripts/after_install.sh << 'EOF'
+          cat > $TEMP_DIR/scripts/after_install.sh << 'AFTER_INSTALL_EOF'
           #!/bin/bash
           echo "After installation steps starting at $(date)"
           
@@ -170,7 +170,7 @@ jobs:
           ENVEOF
           
           # Create health server file
-          cat > /home/ec2-user/prepzo_bot/health_server.py << 'EOF'
+          cat > /home/ec2-user/prepzo_bot/health_server.py << 'HEALTH_EOF'
           import flask
           import os
           import json
@@ -192,11 +192,11 @@ jobs:
           if __name__ == "__main__":
               port = int(os.environ.get("HEALTH_CHECK_PORT", 8080))
               app.run(host="0.0.0.0", port=port)
-          EOF
-          EOF
+          HEALTH_EOF
+          AFTER_INSTALL_EOF
           
           # Create service files
-          cat > $TEMP_DIR/etc/systemd/system/prepzo-health.service << 'EOF'
+          cat > $TEMP_DIR/etc/systemd/system/prepzo-health.service << 'HEALTH_SERVICE_EOF'
           [Unit]
           Description=Prepzo Health Check Service
           After=network.target
@@ -211,9 +211,9 @@ jobs:
           
           [Install]
           WantedBy=multi-user.target
-          EOF
+          HEALTH_SERVICE_EOF
           
-          cat > $TEMP_DIR/etc/systemd/system/prepzo-bot.service << 'EOF'
+          cat > $TEMP_DIR/etc/systemd/system/prepzo-bot.service << 'BOT_SERVICE_EOF'
           [Unit]
           Description=Prepzo Bot Service
           After=network.target
@@ -228,9 +228,9 @@ jobs:
           
           [Install]
           WantedBy=multi-user.target
-          EOF
+          BOT_SERVICE_EOF
           
-          cat > $TEMP_DIR/scripts/start_application.sh << 'EOF'
+          cat > $TEMP_DIR/scripts/start_application.sh << 'START_EOF'
           #!/bin/bash
           echo "Starting application at $(date)"
           
@@ -245,9 +245,9 @@ jobs:
           
           # Set up port forwarding
           iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080 || echo "Failed to set up port forwarding"
-          EOF
+          START_EOF
           
-          cat > $TEMP_DIR/scripts/validate_service.sh << 'EOF'
+          cat > $TEMP_DIR/scripts/validate_service.sh << 'VALIDATE_EOF'
           #!/bin/bash
           echo "Validating service at $(date)"
           
@@ -273,7 +273,7 @@ jobs:
           
           echo "❌ Service validation failed after $MAX_RETRIES attempts"
           exit 1
-          EOF
+          VALIDATE_EOF
           
           # Make scripts executable
           chmod +x $TEMP_DIR/scripts/*.sh
