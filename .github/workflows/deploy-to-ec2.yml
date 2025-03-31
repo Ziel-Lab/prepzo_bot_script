@@ -338,18 +338,35 @@ jobs:
 
       - name: Setup SSH key
         run: |
+          # Debug key availability (will not print actual key)
+          if [ -z "${{ secrets.EC2_SSH_KEY }}" ]; then
+            echo "ERROR: EC2_SSH_KEY secret is not set in GitHub repository"
+            echo "Please add your private key as a repository secret named EC2_SSH_KEY"
+            echo "Go to your repository → Settings → Secrets and variables → Actions"
+            echo "Add a new repository secret with name: EC2_SSH_KEY"
+            echo "Value should be the content of your EC2 key pair file (prepzo-bot-key.pem)"
+            exit 1
+          fi
+          
           # Create SSH directory
           mkdir -p ~/.ssh
           
           # Save private key from secrets
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           
           # Add host key to known hosts to avoid prompt
           INSTANCE_IP="${{ steps.create_instance.outputs.instance_ip }}"
-          ssh-keyscan -H $INSTANCE_IP >> ~/.ssh/known_hosts
+          echo "Instance IP: $INSTANCE_IP"
           
-          echo "SSH key set up for $INSTANCE_IP"
+          # Skip host key verification for this deployment
+          mkdir -p ~/.ssh
+          echo "Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null" > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          
+          echo "SSH key setup completed"
 
       - name: Deploy directly to EC2 via SSH
         run: |
