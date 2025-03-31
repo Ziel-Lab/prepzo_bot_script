@@ -571,18 +571,55 @@ jobs:
           import os
           import sys
           import time
+          import traceback
+          import logging
+          
+          # Configure logging
+          logging.basicConfig(
+              level=logging.INFO,
+              format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+              handlers=[logging.StreamHandler()]
+          )
+          logger = logging.getLogger("prepzo-bot")
           
           def main():
-              print("Bot starting...")
-              while True:
-                  print("Bot running...")
-                  time.sleep(60)
+              try:
+                  logger.info("Bot starting...")
+                  # Print environment for debugging
+                  logger.info("Environment variables:")
+                  for key, value in os.environ.items():
+                      if not any(secret in key.lower() for secret in ['key', 'secret', 'token', 'password']):
+                          logger.info(f"  {key}: {value}")
+                      else:
+                          logger.info(f"  {key}: ***REDACTED***")
+                  
+                  # Run the bot
+                  while True:
+                      logger.info("Bot running...")
+                      time.sleep(60)
+              except Exception as e:
+                  logger.error(f"Error in main process: {e}")
+                  logger.error(traceback.format_exc())
+                  # Don't exit immediately on error
+                  logger.info("Waiting 30 seconds before retrying...")
+                  time.sleep(30)
+                  return 1
           
           if __name__ == "__main__":
-              if len(sys.argv) > 1 and sys.argv[1] == "start":
-                  main()
-              else:
-                  print("Usage: python main.py start")
+              try:
+                  if len(sys.argv) > 1 and sys.argv[1] == "start":
+                      exit_code = main()
+                      if exit_code:
+                          logger.warning(f"Main function returned exit code {exit_code}, restarting...")
+                          time.sleep(5)
+                          sys.exit(exit_code)
+                  else:
+                      logger.error("Usage: python main.py start")
+                      sys.exit(1)
+              except Exception as e:
+                  logger.critical(f"Unhandled exception: {e}")
+                  logger.critical(traceback.format_exc())
+                  sys.exit(1)
           EOF
           fi
           
