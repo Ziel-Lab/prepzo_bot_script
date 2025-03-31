@@ -373,27 +373,6 @@ jobs:
             ]
           }'
           
-          # Create a custom inline policy for EC2 permissions
-          EC2_POLICY='{
-            "Version": "2012-10-17",
-            "Statement": [
-              {
-                "Effect": "Allow",
-                "Action": [
-                  "ec2:*",
-                  "elasticloadbalancing:*",
-                  "autoscaling:*",
-                  "s3:*",
-                  "sns:*",
-                  "cloudwatch:*",
-                  "logs:*",
-                  "iam:PassRole"
-                ],
-                "Resource": "*"
-              }
-            ]
-          }'
-          
           # Create or update the role
           ROLE_EXISTS=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text 2>/dev/null || echo "")
           
@@ -408,9 +387,10 @@ jobs:
           # Attach required policies
           echo "Attaching policies to CodeDeployServiceRole"
           aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+          aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
           
-          # Add the custom EC2 policy
-          aws iam put-role-policy --role-name CodeDeployServiceRole --policy-name EC2DeployPermissions --policy-document "$EC2_POLICY"
+          # Skip creating custom policy since we've hit policy quotas
+          # using a simpler approach with managed policies
           
           # Wait for role to propagate (longer wait time)
           echo "Waiting for role permissions to propagate (30 seconds)..."
