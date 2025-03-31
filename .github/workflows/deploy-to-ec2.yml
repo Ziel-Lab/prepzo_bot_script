@@ -646,34 +646,80 @@ jobs:
           import time
           import traceback
           import logging
+          import platform
           
-          # Configure logging
-          logging.basicConfig(
-              level=logging.INFO,
-              format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-              handlers=[logging.StreamHandler()]
-          )
+          # Set up file-based logging first to catch all errors
+          os.makedirs('/home/ec2-user/prepzo_bot/logs', exist_ok=True)
+          file_handler = logging.FileHandler('/home/ec2-user/prepzo_bot/logs/bot_error.log')
+          file_handler.setLevel(logging.DEBUG)
+          file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+          
+          # Configure console logging
+          console_handler = logging.StreamHandler()
+          console_handler.setLevel(logging.INFO)
+          console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+          
+          # Root logger setup
+          root_logger = logging.getLogger()
+          root_logger.setLevel(logging.DEBUG)
+          root_logger.addHandler(file_handler)
+          root_logger.addHandler(console_handler)
+          
+          # Our specific logger
           logger = logging.getLogger("prepzo-bot")
+          
+          # Log system information
+          logger.info("=== Starting Prepzo Bot ===")
+          logger.info(f"Python version: {platform.python_version()}")
+          logger.info(f"Platform: {platform.platform()}")
+          logger.info(f"Working directory: {os.getcwd()}")
+          logger.info(f"Script path: {__file__}")
+          
+          try:
+              # Import additional modules with error handling
+              logger.info("Importing dependencies...")
+              missing_modules = []
+              required_modules = ['flask', 'requests', 'boto3']
+              
+              for module in required_modules:
+                  try:
+                      __import__(module)
+                      logger.info(f"Successfully imported {module}")
+                  except ImportError as e:
+                      logger.error(f"Failed to import {module}: {e}")
+                      missing_modules.append(module)
+              
+              if missing_modules:
+                  logger.error(f"Missing required modules: {', '.join(missing_modules)}")
+                  logger.error("Please install them with: pip install " + " ".join(missing_modules))
+          except Exception as e:
+              logger.error(f"Error checking dependencies: {e}")
+              logger.error(traceback.format_exc())
           
           def run_dev_mode():
               """Run in development mode with more debugging"""
-              logger.setLevel(logging.DEBUG)
-              logger.debug("Starting bot in DEV mode...")
-              logger.debug("Environment variables:")
-              for key, value in os.environ.items():
-                  if not any(secret in key.lower() for secret in ['key', 'secret', 'token', 'password']):
-                      logger.debug(f"  {key}: {value}")
-                  else:
-                      logger.debug(f"  {key}: ***REDACTED***")
-              
-              # Run dev mode loop
-              while True:
-                  logger.debug("Bot running in DEV mode...")
-                  time.sleep(30)  # Shorter interval for dev mode
+              try:
+                  logger.setLevel(logging.DEBUG)
+                  logger.debug("Starting bot in DEV mode...")
+                  logger.debug("Environment variables:")
+                  for key, value in os.environ.items():
+                      if not any(secret in key.lower() for secret in ['key', 'secret', 'token', 'password']):
+                          logger.debug(f"  {key}: {value}")
+                      else:
+                          logger.debug(f"  {key}: ***REDACTED***")
+                  
+                  # Run dev mode loop
+                  while True:
+                      logger.debug("Bot running in DEV mode...")
+                      time.sleep(30)  # Shorter interval for dev mode
+              except Exception as e:
+                  logger.error(f"Error in dev mode: {e}")
+                  logger.error(traceback.format_exc())
+                  return 1
           
           def main():
               try:
-                  logger.info("Bot starting...")
+                  logger.info("Bot starting in production mode...")
                   # Print environment for debugging
                   logger.info("Environment variables:")
                   for key, value in os.environ.items():
@@ -686,6 +732,9 @@ jobs:
                   while True:
                       logger.info("Bot running...")
                       time.sleep(60)
+              except KeyboardInterrupt:
+                  logger.info("Received shutdown signal, exiting gracefully")
+                  return 0
               except Exception as e:
                   logger.error(f"Error in main process: {e}")
                   logger.error(traceback.format_exc())
@@ -696,12 +745,15 @@ jobs:
           
           if __name__ == "__main__":
               try:
+                  # Log command arguments
+                  logger.info(f"Command arguments: {sys.argv}")
+                  
                   if len(sys.argv) > 1:
                       if sys.argv[1] == "start":
+                          logger.info("Starting in production mode")
                           exit_code = main()
                           if exit_code:
-                              logger.warning(f"Main function returned exit code {exit_code}, restarting...")
-                              time.sleep(5)
+                              logger.warning(f"Main function returned exit code {exit_code}, exiting...")
                               sys.exit(exit_code)
                       elif sys.argv[1] == "dev":
                           logger.info("Starting in development mode")
@@ -711,32 +763,70 @@ jobs:
                           logger.error("Usage: python main.py [start|dev]")
                           sys.exit(1)
                   else:
+                      logger.error("No command provided")
                       logger.error("Usage: python main.py [start|dev]")
                       sys.exit(1)
               except Exception as e:
                   logger.critical(f"Unhandled exception: {e}")
                   logger.critical(traceback.format_exc())
+                  # Write to file as a last resort
+                  with open('/home/ec2-user/prepzo_bot/critical_error.log', 'a') as f:
+                      f.write(f"\n\n=== Error at {time.ctime()} ===\n")
+                      f.write(f"Error: {e}\n")
+                      f.write(traceback.format_exc())
                   sys.exit(1)
           EOF
           fi
           
-          # Create a manual run script
+          # Create a more robust manual run script
           cat > $DEPLOY_DIR/run_bot.sh << 'EOF'
           #!/bin/bash
-          set -x
+          set -x  # Print all commands for debugging
           
-          # Activate virtual environment
+          # Activate virtual environment with fallbacks
           cd /home/ec2-user/prepzo_bot
-          source venv/bin/activate
+          
+          # Check Python version and location
+          echo "System Python information:"
+          which python3
+          python3 --version
+          
+          # Check if main.py exists and is executable
+          echo "Checking main.py:"
+          ls -la main.py
+          
+          if [ -f venv/bin/activate ]; then
+            echo "Activating virtual environment..."
+            source venv/bin/activate
+            echo "Using Python from virtual environment:"
+            which python
+            python --version
+          else
+            echo "No virtual environment found, using system Python"
+            export PATH=/home/ec2-user/prepzo_bot/venv/bin:$PATH
+          fi
           
           # Load environment variables
+          echo "Loading environment variables..."
           set -a
           source /home/ec2-user/.env/prepzo_bot.env
           set +a
           
-          # Run the bot directly
-          echo "Starting bot directly..."
-          python3 main.py start
+          # Check script content
+          echo "First 10 lines of main.py:"
+          head -n 10 main.py
+          
+          # Run the bot with explicit arguments and error tracking
+          echo "Starting bot..."
+          python3 -u main.py start
+          EXIT_CODE=$?
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "Bot exited with code $EXIT_CODE"
+            echo "Checking for Python errors:"
+            # Try running with -v flag to get more info
+            python3 -v main.py start
+          fi
           EOF
           
           chmod +x $DEPLOY_DIR/run_bot.sh
@@ -799,4 +889,137 @@ jobs:
           echo "Public IP: $INSTANCE_IP"
           echo "Health check URL: http://$INSTANCE_IP:8080/health"
           echo "SSH: ssh ec2-user@$INSTANCE_IP"
-          echo "====================================================================" 
+          echo "===================================================================="
+          
+          # Create a troubleshooting script
+          cat > $DEPLOY_DIR/debug.sh << 'EOF'
+          #!/bin/bash
+          set -x
+          
+          echo "=== Prepzo Bot Troubleshooter ==="
+          echo "Running diagnostics for service failure..."
+          
+          # Check if script exists and has correct permissions
+          cd /home/ec2-user/prepzo_bot
+          
+          echo "Checking file ownership and permissions:"
+          ls -la
+          
+          echo "Setting correct permissions:"
+          sudo chown -R ec2-user:ec2-user /home/ec2-user/prepzo_bot
+          chmod +x *.py
+          
+          echo "Checking Python and pip installations:"
+          which python3
+          python3 --version
+          which pip3
+          pip3 --version
+          
+          echo "Checking virtual environment:"
+          if [ -d "venv" ]; then
+            echo "Virtual environment exists, checking integrity:"
+            ls -la venv/bin/
+          else
+            echo "Creating new virtual environment:"
+            python3 -m venv venv || {
+              echo "Failed to create venv, trying with pip:"
+              pip3 install virtualenv
+              python3 -m virtualenv venv
+            }
+          fi
+          
+          echo "Installing required packages:"
+          source venv/bin/activate || echo "Failed to activate venv, continuing anyway"
+          pip install --upgrade pip
+          pip install flask boto3 requests
+          
+          echo "Checking for Python syntax errors in main.py:"
+          python3 -m py_compile main.py || {
+            echo "Syntax error found in main.py, attempting to fix common issues:"
+            sed -i 's/\r$//' main.py  # Fix windows line endings
+            python3 -m py_compile main.py || echo "Still has syntax errors"
+          }
+          
+          echo "Attempting to run main.py manually:"
+          python3 -u main.py || echo "Failed with standard arguments"
+          
+          echo "Checking systemd service configuration:"
+          sudo systemctl cat prepzo-bot.service
+          
+          echo "Service logs:"
+          sudo journalctl -u prepzo-bot -n 50
+          
+          echo "Creating fresh service files with verified paths:"
+          cat > /tmp/prepzo-bot.service << 'SERVICE_EOF'
+          [Unit]
+          Description=Prepzo Bot Service
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=ec2-user
+          WorkingDirectory=/home/ec2-user/prepzo_bot
+          EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env
+          ExecStart=/usr/bin/python3 /home/ec2-user/prepzo_bot/main.py start
+          StandardOutput=journal
+          StandardError=journal
+          Restart=always
+          RestartSec=10
+          
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE_EOF
+          
+          sudo cp /tmp/prepzo-bot.service /etc/systemd/system/
+          sudo systemctl daemon-reload
+          
+          echo "Fixing environment file permissions:"
+          sudo mkdir -p /home/ec2-user/.env
+          sudo chown -R ec2-user:ec2-user /home/ec2-user/.env
+          
+          echo "Creating debug output to verify service functionality:"
+          echo '#!/usr/bin/env python3
+          import os
+          import sys
+          import time
+          
+          # Create log file
+          with open("/home/ec2-user/prepzo_bot/startup.log", "a") as f:
+              f.write(f"=== Script started at {time.ctime()} ===\\n")
+              f.write(f"Args: {sys.argv}\\n")
+              f.write(f"Working dir: {os.getcwd()}\\n")
+              f.write(f"Python: {sys.executable}\\n")
+              f.write(f"Path: {sys.path}\\n")
+              f.write("Environment variables:\\n")
+              for key, value in os.environ.items():
+                  if not any(secret in key.lower() for secret in ["key", "secret", "token", "password"]):
+                      f.write(f"  {key}: {value}\\n")
+                  else:
+                      f.write(f"  {key}: ***REDACTED***\\n")
+          
+          # Simple loop that won\'t crash
+          print("Starting minimal bot...")
+          counter = 0
+          while True:
+              counter += 1
+              print(f"Bot running (count: {counter})")
+              with open("/home/ec2-user/prepzo_bot/status.log", "a") as f:
+                  f.write(f"{time.ctime()}: Heartbeat {counter}\\n")
+              time.sleep(60)
+          ' > /home/ec2-user/prepzo_bot/minimal.py
+          
+          chmod +x /home/ec2-user/prepzo_bot/minimal.py
+          
+          echo "Starting simplified service for testing:"
+          sudo systemctl stop prepzo-bot
+          sudo sh -c 'echo "ExecStart=/usr/bin/python3 /home/ec2-user/prepzo_bot/minimal.py" > /etc/systemd/system/prepzo-bot.service.d/override.conf'
+          sudo systemctl daemon-reload
+          sudo systemctl restart prepzo-bot
+          
+          echo "Checking status after restart:"
+          sudo systemctl status prepzo-bot
+          
+          echo "Diagnostics complete. Check logs at /home/ec2-user/prepzo_bot/startup.log"
+          EOF
+          
+          chmod +x $DEPLOY_DIR/debug.sh 
