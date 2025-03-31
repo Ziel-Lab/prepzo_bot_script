@@ -173,6 +173,10 @@ jobs:
           
           # Install Python 3
           yum install -y python3 python3-pip
+          
+          # Make sure SSH is running and enabled
+          systemctl enable sshd
+          systemctl start sshd
           EOF
           )
           
@@ -209,6 +213,14 @@ jobs:
           INSTANCE_IP=$(aws ec2 describe-instances --instance-ids ${INSTANCE_ID} --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
           echo "New instance public IP: ${INSTANCE_IP}"
           echo "instance_ip=${INSTANCE_IP}" >> $GITHUB_OUTPUT
+          
+          # Verify the security group allows SSH connections
+          echo "Verifying security group rules..."
+          aws ec2 describe-security-groups --group-ids ${SG_ID} --query "SecurityGroups[0].IpPermissions[?ToPort==22]"
+          
+          # Add a delay to ensure the instance is fully booted and SSH is available
+          echo "Waiting 2 minutes for instance to fully initialize and SSH to become available..."
+          sleep 120
 
       - name: Fix script line endings and permissions
         run: |
@@ -367,11 +379,23 @@ jobs:
           chmod 600 ~/.ssh/config
           
           echo "SSH key setup completed"
+          
+          # Test network connectivity to the instance
+          echo "Testing basic connectivity to instance..."
+          ping -c 4 $INSTANCE_IP || echo "Ping failed but continuing"
+          
+          # Test TCP connectivity
+          echo "Testing TCP connectivity to SSH port..."
+          nc -zv $INSTANCE_IP 22 -w 10 || echo "TCP connection test failed but continuing"
 
       - name: Deploy directly to EC2 via SSH
         run: |
           # Get instance IP
           INSTANCE_IP="${{ steps.create_instance.outputs.instance_ip }}"
+          
+          # Debug: check instance console output (might help diagnose boot issues)
+          echo "Getting console output from instance..."
+          aws ec2 get-console-output --instance-id ${{ steps.create_instance.outputs.instance_id }} --output text || echo "Could not get console output"
           
           echo "Creating deployment package..."
           DEPLOY_DIR=prepzo_bot_deploy
