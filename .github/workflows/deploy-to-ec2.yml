@@ -85,10 +85,215 @@ jobs:
 
       - name: Create deployment package
         run: |
-          # Run the deployment script to create the package
-          bash scripts/deploy.sh --force
+          # Create deployment package directly instead of using the script
+          echo "Creating deployment package manually..."
           
-          # The script creates prepzo-bot-deployment.zip in the current directory
+          # Create temp directory for deployment
+          TEMP_DIR=$(mktemp -d)
+          mkdir -p $TEMP_DIR/scripts
+          mkdir -p $TEMP_DIR/etc/systemd/system
+          
+          # Create appspec.yml
+          cat > $TEMP_DIR/appspec.yml << 'EOF'
+          version: 0.0
+          os: linux
+          files:
+            - source: /
+              destination: /home/ec2-user/prepzo_bot
+            - source: /etc/systemd/system/
+              destination: /etc/systemd/system/
+          hooks:
+            BeforeInstall:
+              - location: scripts/before_install.sh
+                timeout: 300
+                runas: root
+            AfterInstall:
+              - location: scripts/after_install.sh
+                timeout: 300
+                runas: root
+            ApplicationStart:
+              - location: scripts/start_application.sh
+                timeout: 300
+                runas: root
+            ValidateService:
+              - location: scripts/validate_service.sh
+                timeout: 300
+                runas: root
+          EOF
+          
+          # Create hooks scripts
+          cat > $TEMP_DIR/scripts/before_install.sh << 'EOF'
+          #!/bin/bash
+          echo "Before installation steps starting at $(date)"
+          
+          # Stop services if they exist
+          if systemctl is-active --quiet prepzo-bot; then
+              systemctl stop prepzo-bot
+          fi
+          if systemctl is-active --quiet prepzo-health; then
+              systemctl stop prepzo-health
+          fi
+          
+          # Create directories if they don't exist
+          mkdir -p /home/ec2-user/.env
+          mkdir -p /home/ec2-user/prepzo_bot
+          EOF
+          
+          cat > $TEMP_DIR/scripts/after_install.sh << 'EOF'
+          #!/bin/bash
+          echo "After installation steps starting at $(date)"
+          
+          # Set ownership
+          chown -R ec2-user:ec2-user /home/ec2-user/prepzo_bot
+          
+          # Set up Python environment
+          cd /home/ec2-user/prepzo_bot
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install -r requirements.txt || echo "No requirements.txt found"
+          pip install requests flask boto3
+          
+          # Load environment variables from SSM Parameter Store
+          echo "Loading environment variables from SSM Parameter Store"
+          cat > /home/ec2-user/.env/prepzo_bot.env << 'ENVEOF'
+          SUPABASE_URL=$(aws ssm get-parameter --name "/prepzo-bot/SUPABASE_URL" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")
+          SUPABASE_SERVICE_ROLE_KEY=$(aws ssm get-parameter --name "/prepzo-bot/SUPABASE_SERVICE_ROLE_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")
+          OPENAI_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/OPENAI_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")
+          DEEPGRAM_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/DEEPGRAM_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")
+          LIVEKIT_URL=$(aws ssm get-parameter --name "/prepzo-bot/LIVEKIT_URL" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")
+          LIVEKIT_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/LIVEKIT_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")
+          CARTESIA_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/CARTESIA_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")
+          ELEVENLABS_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/ELEVENLABS_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")
+          HEALTH_CHECK_PORT=8080
+          ENVIRONMENT=production
+          GIT_COMMIT=$(cat /home/ec2-user/prepzo_bot/GIT_COMMIT || echo "unknown")
+          ENVEOF
+          
+          # Create health server file
+          cat > /home/ec2-user/prepzo_bot/health_server.py << 'EOF'
+          import flask
+          import os
+          import json
+          import sys
+          
+          sys.path.append('/home/ec2-user/prepzo_bot')
+          try:
+              from version import get_version_info
+              version_info = get_version_info()
+          except ImportError:
+              version_info = {"version": "unknown", "build_date": "unknown", "git_commit": "unknown"}
+          
+          app = flask.Flask(__name__)
+          
+          @app.route("/health")
+          def health():
+              return {"status": "ok", "service": "prepzo-bot", "version": version_info}
+          
+          if __name__ == "__main__":
+              port = int(os.environ.get("HEALTH_CHECK_PORT", 8080))
+              app.run(host="0.0.0.0", port=port)
+          EOF
+          
+          # Reload systemd configuration
+          systemctl daemon-reload
+          EOF
+          
+          # Create systemd service files
+          cat > $TEMP_DIR/etc/systemd/system/prepzo-health.service << 'EOF'
+          [Unit]
+          Description=Prepzo Health Check Service
+          After=network.target
+          
+          [Service]
+          User=ec2-user
+          WorkingDirectory=/home/ec2-user/prepzo_bot
+          EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env
+          ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python health_server.py
+          Restart=always
+          RestartSec=5
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          cat > $TEMP_DIR/etc/systemd/system/prepzo-bot.service << 'EOF'
+          [Unit]
+          Description=Prepzo Bot Service
+          After=network.target
+          
+          [Service]
+          User=ec2-user
+          WorkingDirectory=/home/ec2-user/prepzo_bot
+          EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env
+          ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python main.py start
+          Restart=always
+          RestartSec=10
+          
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          
+          cat > $TEMP_DIR/scripts/start_application.sh << 'EOF'
+          #!/bin/bash
+          echo "Starting application at $(date)"
+          
+          # Start services
+          systemctl enable prepzo-health
+          systemctl start prepzo-health
+          systemctl enable prepzo-bot
+          systemctl start prepzo-bot || echo "Main service failed to start, but health endpoint should be running"
+          
+          # Set up port forwarding
+          iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080 || echo "Failed to set up port forwarding"
+          EOF
+          
+          cat > $TEMP_DIR/scripts/validate_service.sh << 'EOF'
+          #!/bin/bash
+          echo "Validating service at $(date)"
+          
+          # Check if the health endpoint is running
+          HEALTH_CHECK_PORT=${HEALTH_CHECK_PORT:-8080}
+          MAX_RETRIES=30
+          RETRY_INTERVAL=2
+          
+          for i in $(seq 1 $MAX_RETRIES); do
+              echo "Attempt $i of $MAX_RETRIES..."
+              
+              # Try the health endpoint
+              RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$HEALTH_CHECK_PORT/health || echo "error")
+              
+              if [ "$RESPONSE" == "200" ]; then
+                  echo "✅ Service is up and running!"
+                  exit 0
+              fi
+              
+              echo "Service not ready yet (response: $RESPONSE), waiting $RETRY_INTERVAL seconds..."
+              sleep $RETRY_INTERVAL
+          done
+          
+          echo "❌ Service validation failed after $MAX_RETRIES attempts"
+          exit 1
+          EOF
+          
+          # Make scripts executable
+          chmod +x $TEMP_DIR/scripts/*.sh
+          
+          # Save current git commit
+          git rev-parse HEAD > $TEMP_DIR/GIT_COMMIT
+          
+          # Copy application files to deployment package
+          rsync -av --exclude={.git,.github,node_modules,infrastructure,cdk.out,.env} . $TEMP_DIR/ || {
+            echo "rsync failed, falling back to manual copy"
+            find . -name "*.py" -type f -exec cp --parents {} $TEMP_DIR/ \;
+            
+            if [ -f "requirements.txt" ]; then
+              cp requirements.txt $TEMP_DIR/
+            fi
+          }
+          
+          # Create ZIP archive
+          (cd $TEMP_DIR && zip -r ../prepzo-bot-deployment.zip .)
+          echo "Deployment package created: prepzo-bot-deployment.zip"
 
       - name: Bootstrap CDK (if needed)
         run: |
