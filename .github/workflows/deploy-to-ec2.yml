@@ -321,68 +321,82 @@ jobs:
           APP_NAME="PrepzoBotApplication"
           DEPLOY_GROUP="PrepzoBotDeploymentGroup"
           
-          # Create application if it doesn't exist
-          APP_EXISTS=$(aws deploy list-applications --query "applications[?contains(@,'${APP_NAME}')]" --output text || echo "")
+          # First, delete any existing deployment groups and roles to ensure clean setup
+          aws deploy delete-deployment-group --application-name ${APP_NAME} --deployment-group-name ${DEPLOY_GROUP} || echo "No deployment group to delete"
+          aws deploy delete-application --application-name ${APP_NAME} || echo "No application to delete"
+          aws iam detach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforAWSCodeDeploy || echo "No policy to detach"
+          aws iam detach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess || echo "No policy to detach"
+          aws iam delete-role --role-name CodeDeployServiceRole || echo "No role to delete"
           
-          if [ -z "$APP_EXISTS" ]; then
-            echo "Creating CodeDeploy application: ${APP_NAME}"
-            aws deploy create-application --application-name ${APP_NAME}
-          else
-            echo "CodeDeploy application ${APP_NAME} already exists"
-          fi
+          echo "Waiting for resources to be fully deleted..."
+          sleep 10
           
-          # Check if deployment group exists
-          DEPLOY_GROUP_EXISTS=$(aws deploy list-deployment-groups --application-name ${APP_NAME} --query "deploymentGroups[?contains(@,'${DEPLOY_GROUP}')]" --output text 2>/dev/null || echo "")
+          # Create application
+          echo "Creating CodeDeploy application: ${APP_NAME}"
+          aws deploy create-application --application-name ${APP_NAME}
           
-          if [ -z "$DEPLOY_GROUP_EXISTS" ]; then
-            # Create service role for CodeDeploy if it doesn't exist
-            ROLE_ARN=$(aws iam list-roles --query "Roles[?RoleName=='CodeDeployServiceRole'].Arn" --output text)
+          # Create new service role with all required permissions
+          echo "Creating new CodeDeploy service role"
+          TRUST_POLICY='{
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "codedeploy.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          }'
+          
+          # Create a custom inline policy for EC2 permissions
+          EC2_POLICY='{
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "ec2:*",
+                  "elasticloadbalancing:*",
+                  "autoscaling:*",
+                  "s3:*",
+                  "sns:*",
+                  "cloudwatch:*",
+                  "logs:*",
+                  "iam:PassRole"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }'
+          
+          # Create the role
+          aws iam create-role --role-name CodeDeployServiceRole --assume-role-policy-document "$TRUST_POLICY"
+          
+          # Attach required policies
+          aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+          
+          # Add the custom EC2 policy
+          aws iam put-role-policy --role-name CodeDeployServiceRole --policy-name EC2DeployPermissions --policy-document "$EC2_POLICY"
+          
+          # Wait for role to propagate (longer wait time)
+          echo "Waiting for role permissions to propagate (30 seconds)..."
+          sleep 30
+          
+          ROLE_ARN=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text)
+          
+          # Create deployment group using the instance name tag
+          echo "Creating deployment group with EC2 instance tag Name=bot_script_main"
+          
+          aws deploy create-deployment-group \
+            --application-name ${APP_NAME} \
+            --deployment-group-name ${DEPLOY_GROUP} \
+            --deployment-config-name CodeDeployDefault.AllAtOnce \
+            --ec2-tag-filters Key=Name,Value=bot_script_main,Type=KEY_AND_VALUE \
+            --service-role-arn ${ROLE_ARN}
             
-            if [ -z "$ROLE_ARN" ]; then
-              echo "Creating CodeDeploy service role"
-              TRUST_POLICY='{
-                "Version": "2012-10-17",
-                "Statement": [
-                  {
-                    "Sid": "",
-                    "Effect": "Allow",
-                    "Principal": {
-                      "Service": "codedeploy.amazonaws.com"
-                    },
-                    "Action": "sts:AssumeRole"
-                  }
-                ]
-              }'
-              
-              aws iam create-role --role-name CodeDeployServiceRole --assume-role-policy-document "$TRUST_POLICY"
-              aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforAWSCodeDeploy
-              # Add EC2 permissions
-              aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess
-              
-              # Wait for role to propagate
-              echo "Waiting for role permissions to propagate..."
-              sleep 10
-              
-              ROLE_ARN=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text)
-            fi
-            
-            # Use the hardcoded instance ID
-            INSTANCE_ID="i-0cfb0559a2ce347e6"  # User's bot_script_main instance
-            
-            echo "Creating CodeDeploy deployment group with instance $INSTANCE_ID"
-            
-            # Create the deployment group with specific instance ID
-            aws deploy create-deployment-group \
-              --application-name ${APP_NAME} \
-              --deployment-group-name ${DEPLOY_GROUP} \
-              --deployment-config-name CodeDeployDefault.AllAtOnce \
-              --ec2-tag-filters Key=Name,Value=bot_script_main,Type=KEY_AND_VALUE \
-              --service-role-arn ${ROLE_ARN}
-              
-            echo "CodeDeploy deployment group created"
-          else
-            echo "CodeDeploy deployment group ${DEPLOY_GROUP} already exists"
-          fi
+          echo "CodeDeploy deployment group created with role ARN: ${ROLE_ARN}"
 
       - name: Upload deployment package to S3
         run: |
