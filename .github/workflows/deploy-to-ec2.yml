@@ -321,12 +321,35 @@ jobs:
           APP_NAME="PrepzoBotApplication"
           DEPLOY_GROUP="PrepzoBotDeploymentGroup"
           
-          # First, delete any existing deployment groups and roles to ensure clean setup
+          # Delete deployment group if it exists
           aws deploy delete-deployment-group --application-name ${APP_NAME} --deployment-group-name ${DEPLOY_GROUP} || echo "No deployment group to delete"
           aws deploy delete-application --application-name ${APP_NAME} || echo "No application to delete"
-          aws iam detach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforAWSCodeDeploy || echo "No policy to detach"
-          aws iam detach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess || echo "No policy to detach"
-          aws iam delete-role --role-name CodeDeployServiceRole || echo "No role to delete"
+          
+          # Handle the CodeDeployServiceRole properly
+          echo "Checking for existing CodeDeployServiceRole..."
+          ROLE_EXISTS=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text 2>/dev/null || echo "")
+          
+          if [ ! -z "$ROLE_EXISTS" ]; then
+            echo "CodeDeployServiceRole exists, cleaning up attached policies"
+            # List all attached policies and detach them
+            ATTACHED_POLICIES=$(aws iam list-attached-role-policies --role-name CodeDeployServiceRole --query "AttachedPolicies[*].PolicyArn" --output text)
+            
+            for POLICY_ARN in $ATTACHED_POLICIES; do
+              echo "Detaching policy: $POLICY_ARN"
+              aws iam detach-role-policy --role-name CodeDeployServiceRole --policy-arn $POLICY_ARN
+            done
+            
+            # List inline policies
+            INLINE_POLICIES=$(aws iam list-role-policies --role-name CodeDeployServiceRole --query "PolicyNames" --output text)
+            
+            for POLICY_NAME in $INLINE_POLICIES; do
+              echo "Deleting inline policy: $POLICY_NAME"
+              aws iam delete-role-policy --role-name CodeDeployServiceRole --policy-name $POLICY_NAME
+            done
+            
+            # Try to delete the role if it has no policies
+            aws iam delete-role --role-name CodeDeployServiceRole || echo "Could not delete role, will reuse it"
+          fi
           
           echo "Waiting for resources to be fully deleted..."
           sleep 10
@@ -335,8 +358,8 @@ jobs:
           echo "Creating CodeDeploy application: ${APP_NAME}"
           aws deploy create-application --application-name ${APP_NAME}
           
-          # Create new service role with all required permissions
-          echo "Creating new CodeDeploy service role"
+          # Create or update service role
+          echo "Setting up CodeDeploy service role"
           TRUST_POLICY='{
             "Version": "2012-10-17",
             "Statement": [
@@ -371,10 +394,19 @@ jobs:
             ]
           }'
           
-          # Create the role
-          aws iam create-role --role-name CodeDeployServiceRole --assume-role-policy-document "$TRUST_POLICY"
+          # Create or update the role
+          ROLE_EXISTS=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text 2>/dev/null || echo "")
+          
+          if [ -z "$ROLE_EXISTS" ]; then
+            echo "Creating new CodeDeployServiceRole"
+            aws iam create-role --role-name CodeDeployServiceRole --assume-role-policy-document "$TRUST_POLICY"
+          else
+            echo "Updating existing CodeDeployServiceRole"
+            aws iam update-assume-role-policy --role-name CodeDeployServiceRole --policy-document "$TRUST_POLICY"
+          fi
           
           # Attach required policies
+          echo "Attaching policies to CodeDeployServiceRole"
           aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
           
           # Add the custom EC2 policy
