@@ -140,8 +140,8 @@ jobs:
       - name: Create and Configure EC2 Instance
         id: create_instance
         run: |
-          # Use Amazon Linux 2 AMI (this is eu-north-1 region's AL2 AMI)
-          AMI_ID="ami-0efb5070c4c1c3b17"
+          # Use Amazon Linux 2 AMI (Updated AMI ID for eu-north-1 region)
+          AMI_ID="ami-040d60c831d02d41c"  # Amazon Linux 2 AMI for eu-north-1
           INSTANCE_TYPE="t3.small"
           EC2_KEY_NAME="prepzo-bot-key" # This should be a key pair that exists in your account
           
