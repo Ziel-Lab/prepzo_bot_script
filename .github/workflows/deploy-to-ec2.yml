@@ -86,7 +86,7 @@ jobs:
       - name: Create deployment package
         run: |
           # Run the deployment script to create the package
-          sh scripts/deploy.sh --force
+          bash scripts/deploy.sh --force
           
           # The script creates prepzo-bot-deployment.zip in the current directory
 
@@ -162,8 +162,16 @@ jobs:
               ROLE_ARN=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text)
             fi
             
-            # Get the EC2 instance ID with the tag "Name" containing "PrepzoBot"
-            INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=*PrepzoBot*" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].InstanceId" --output text)
+            # Find EC2 instance by public IP or instance ID
+            # If you know your instance ID, replace the line below with:
+            INSTANCE_ID="i-0cfb0559a2ce347e6"  # User's bot_script_main instance
+            # If you know your public IP, use the line below:
+            # INSTANCE_IP="YOUR_INSTANCE_PUBLIC_IP"
+            # INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=ip-address,Values=${INSTANCE_IP}" --query "Reservations[0].Instances[0].InstanceId" --output text)
+            
+            # Get all running instances and use the first one (WARNING: only works if you have a single instance)
+            # echo "Finding an available EC2 instance..."
+            # INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].InstanceId" --output text)
             
             if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
               echo "No running instance found. Deploying using CDK first..."
@@ -172,7 +180,7 @@ jobs:
               npx cdk deploy --require-approval never
               
               # Get the instance ID after deployment
-              INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=*PrepzoBot*" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].InstanceId" --output text)
+              INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].InstanceId" --output text)
               
               if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
                 echo "Failed to find EC2 instance even after CDK deployment"
@@ -182,12 +190,12 @@ jobs:
             
             echo "Creating CodeDeploy deployment group with instance $INSTANCE_ID"
             
-            # Create the deployment group
+            # Create the deployment group with specific instance ID
             aws deploy create-deployment-group \
               --application-name ${APP_NAME} \
               --deployment-group-name ${DEPLOY_GROUP} \
               --deployment-config-name CodeDeployDefault.AllAtOnce \
-              --ec2-tag-filters Key=Name,Value=*PrepzoBot*,Type=KEY_AND_VALUE \
+              --ec2-tag-sets "Key=aws:ec2:instance-id,Type=KEY_AND_VALUE,Value=${INSTANCE_ID}" \
               --service-role-arn ${ROLE_ARN}
               
             echo "CodeDeploy deployment group created"
@@ -249,9 +257,9 @@ jobs:
 
       - name: Verify deployment
         run: |
-          # Get instance IP
+          # Get instance IP for the specific instance
           INSTANCE_IP=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=*PrepzoBot*" "Name=instance-state-name,Values=running" \
+            --instance-ids i-0cfb0559a2ce347e6 \
             --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
           
           if [ -z "$INSTANCE_IP" ] || [ "$INSTANCE_IP" == "None" ]; then

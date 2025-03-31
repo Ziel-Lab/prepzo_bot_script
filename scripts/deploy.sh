@@ -29,8 +29,8 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # Get repository info
-REPO_URL=$(git config --get remote.origin.url)
-REPO_NAME=$(echo $REPO_URL | sed 's/.*github.com[:/]\(.*\)\.git/\1/')
+REPO_URL=$(git config --get remote.origin.url || echo "unknown")
+REPO_NAME=$(echo $REPO_URL | sed 's/.*github.com[:/]\(.*\)\.git/\1/' || echo "unknown")
 GITHUB_ACTIONS_URL="https://github.com/$REPO_NAME/actions"
 
 # Update version.py with current date
@@ -93,6 +93,7 @@ echo "Creating local deployment package..."
 # Create temporary directory for deployment package
 TEMP_DIR=$(mktemp -d)
 mkdir -p $TEMP_DIR/scripts
+mkdir -p $TEMP_DIR/etc/systemd/system
 
 # Create appspec.yml
 cat > $TEMP_DIR/appspec.yml << 'EOF'
@@ -101,6 +102,8 @@ os: linux
 files:
   - source: /
     destination: /home/ec2-user/prepzo_bot
+  - source: /etc/systemd/system/
+    destination: /etc/systemd/system/
 hooks:
   BeforeInstall:
     - location: scripts/before_install.sh
@@ -193,8 +196,12 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=port)
 EOF
 
-# Create service files
-cat > /etc/systemd/system/prepzo-health.service << 'EOF'
+# Reload systemd configuration
+systemctl daemon-reload
+EOF
+
+# Create service files in the temp directory instead of directly to system
+cat > $TEMP_DIR/etc/systemd/system/prepzo-health.service << 'EOF'
 [Unit]
 Description=Prepzo Health Check Service
 After=network.target
@@ -211,7 +218,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/systemd/system/prepzo-bot.service << 'EOF'
+cat > $TEMP_DIR/etc/systemd/system/prepzo-bot.service << 'EOF'
 [Unit]
 Description=Prepzo Bot Service
 After=network.target
@@ -226,10 +233,6 @@ RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
-EOF
-
-# Reload systemd configuration
-systemctl daemon-reload
 EOF
 
 cat > $TEMP_DIR/scripts/start_application.sh << 'EOF'
@@ -295,7 +298,7 @@ rsync -av --exclude={.git,.github,node_modules,infrastructure,deployment,.env} .
 echo "Deployment package created: prepzo-bot-deployment.zip"
 
 # If AWS CLI is installed, offer to deploy directly
-if command -v aws &> /dev/null; then
+if command -v aws &> /dev/null && ! $CI; then
   read -p "Do you want to deploy using AWS CodeDeploy? (y/n) " -n 1 -r
   echo
   if [[ $REPLY =~ ^[Yy]$ ]]
@@ -377,16 +380,19 @@ if command -v aws &> /dev/null; then
   fi
 fi
 
-# Push to GitHub to trigger GitHub Actions
-read -p "Do you want to push to GitHub to trigger GitHub Actions? (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]
-then
-  echo "Pushing to GitHub..."
-  git push origin main
+# Don't prompt for GitHub push in GitHub Actions
+if [ -z "$CI" ]; then
+  # Push to GitHub to trigger GitHub Actions
+  read -p "Do you want to push to GitHub to trigger GitHub Actions? (y/n) " -n 1 -r
+  echo
+  if [[ $REPLY =~ ^[Yy]$ ]]
+  then
+    echo "Pushing to GitHub..."
+    git push origin main
 
-  echo "Deployment initiated. Check GitHub Actions for progress."
-  echo "GitHub Actions URL: $GITHUB_ACTIONS_URL"
+    echo "Deployment initiated. Check GitHub Actions for progress."
+    echo "GitHub Actions URL: $GITHUB_ACTIONS_URL"
+  fi
 fi
 
 # Clean up
