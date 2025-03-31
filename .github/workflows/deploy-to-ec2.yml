@@ -1,552 +1,250 @@
-name: Deploy to EC2
+name: Deploy to EC2 with CodeDeploy
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       id-token: write
       contents: read
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-      
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: 'eu-north-1'
-          role-session-name: 'GitHubActionsSession'
-      
-      # Alternative credential setup using standard AWS credential secret names
-      # Uncomment this and comment out the OIDC method above if you prefer using access keys
-      # - name: Configure AWS credentials
-      #   uses: aws-actions/configure-aws-credentials@v2
-      #   with:
-      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      #     aws-region: 'eu-north-1'
-      
-      - name: Set up Node.js
+          fetch-depth: 0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_OIDC_ROLE_ARN }}
+          aws-region: eu-north-1
+
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
+
+      - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: 18
-      
-      - name: Set up Python
-        uses: actions/setup-python@v4
+          node-version: '18'
+
+      - name: Setup Python
+        uses: actions/setup-python@v3
         with:
           python-version: '3.10'
-      
-      - name: Create CDK infrastructure directory
-        run: mkdir -p infrastructure
-      
-      - name: Initialize CDK project
-        working-directory: ./infrastructure
-        run: |
-          npm install -g aws-cdk
-          cdk init app --language typescript
-          
-          # Debug CDK initialization
-          echo "Created CDK project structure:"
-          ls -la
-          
-          # Check default app.ts file
-          echo "Default app.ts content:"
-          cat lib/infrastructure-stack.ts || echo "File not found"
-      
-      - name: Install CDK dependencies
-        working-directory: ./infrastructure
-        run: |
-          npm install aws-cdk-lib constructs
-          # Fix: The v2 CDK imports moved into aws-cdk-lib
-          npm install typescript aws-cdk-lib @types/node
-      
-      - name: Create CDK stack
-        working-directory: ./infrastructure
-        run: |
-          # Check what files were created by CDK init
-          echo "Files created by CDK init:"
-          find . -type f | grep -v "node_modules"
-          
-          # Find the default stack name
-          DEFAULT_STACK_NAME=$(grep -r "class" --include="*.ts" lib/ | head -1 | awk -F 'class ' '{print $2}' | awk -F ' ' '{print $1}' || echo "UnknownStack")
-          echo "Default stack name detected: $DEFAULT_STACK_NAME"
-          
-          # Create stack file using echo commands instead of heredoc
-          echo 'import * as cdk from "aws-cdk-lib";' > lib/prepzo-bot-stack.ts
-          echo 'import { Construct } from "constructs";' >> lib/prepzo-bot-stack.ts
-          echo 'import * as ec2 from "aws-cdk-lib/aws-ec2";' >> lib/prepzo-bot-stack.ts
-          echo 'import * as iam from "aws-cdk-lib/aws-iam";' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo 'export class PrepzoBotStack extends cdk.Stack {' >> lib/prepzo-bot-stack.ts
-          echo '  constructor(scope: Construct, id: string, props?: cdk.StackProps) {' >> lib/prepzo-bot-stack.ts
-          echo '    super(scope, id, props);' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '    // Create a VPC' >> lib/prepzo-bot-stack.ts
-          echo '    const vpc = new ec2.Vpc(this, "PrepzoBotVPC", {' >> lib/prepzo-bot-stack.ts
-          echo '      maxAzs: 2,' >> lib/prepzo-bot-stack.ts
-          echo '      natGateways: 0,' >> lib/prepzo-bot-stack.ts
-          echo '      subnetConfiguration: [' >> lib/prepzo-bot-stack.ts
-          echo '        {' >> lib/prepzo-bot-stack.ts
-          echo '          name: "public",' >> lib/prepzo-bot-stack.ts
-          echo '          subnetType: ec2.SubnetType.PUBLIC,' >> lib/prepzo-bot-stack.ts
-          echo '        }' >> lib/prepzo-bot-stack.ts
-          echo '      ],' >> lib/prepzo-bot-stack.ts
-          echo '    });' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '    // Security group' >> lib/prepzo-bot-stack.ts
-          echo '    const securityGroup = new ec2.SecurityGroup(this, "PrepzoBotSecurityGroup", {' >> lib/prepzo-bot-stack.ts
-          echo '      vpc,' >> lib/prepzo-bot-stack.ts
-          echo '      description: "Allow SSH and HTTP(S) access",' >> lib/prepzo-bot-stack.ts
-          echo '      allowAllOutbound: true,' >> lib/prepzo-bot-stack.ts
-          echo '    });' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '    // Add inbound rules' >> lib/prepzo-bot-stack.ts
-          echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), "Allow SSH access from anywhere");' >> lib/prepzo-bot-stack.ts
-          echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), "Allow HTTP access from anywhere");' >> lib/prepzo-bot-stack.ts
-          echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), "Allow HTTPS access from anywhere");' >> lib/prepzo-bot-stack.ts
-          echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(3000), "Allow access on port 3000");' >> lib/prepzo-bot-stack.ts
-          echo '    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(8080), "Allow access to health check endpoint");' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '    // Create a role for the EC2 instance' >> lib/prepzo-bot-stack.ts
-          echo '    const role = new iam.Role(this, "PrepzoBotRole", {' >> lib/prepzo-bot-stack.ts
-          echo '      assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),' >> lib/prepzo-bot-stack.ts
-          echo '    });' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '    // Add managed policies to the role' >> lib/prepzo-bot-stack.ts
-          echo '    role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonSSMManagedInstanceCore"));' >> lib/prepzo-bot-stack.ts
-          echo '    ' >> lib/prepzo-bot-stack.ts
-          echo '    // Add inline policy for Parameter Store access' >> lib/prepzo-bot-stack.ts
-          echo '    role.addToPolicy(new iam.PolicyStatement({' >> lib/prepzo-bot-stack.ts
-          echo '      actions: ["ssm:GetParameter*"],' >> lib/prepzo-bot-stack.ts
-          echo '      resources: ["arn:aws:ssm:*:*:parameter/prepzo-bot/*"],' >> lib/prepzo-bot-stack.ts
-          echo '    }));' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '    // User data script for EC2 instance' >> lib/prepzo-bot-stack.ts
-          echo '    const userData = ec2.UserData.forLinux();' >> lib/prepzo-bot-stack.ts
-          echo '    // Prepare user data commands' >> lib/prepzo-bot-stack.ts
-          echo '    const userDataCommands = `#!/bin/bash' >> lib/prepzo-bot-stack.ts
-          echo 'yum update -y' >> lib/prepzo-bot-stack.ts
-          echo 'yum install -y git python3 python3-pip python3-venv nc curl systemd jq awscli' >> lib/prepzo-bot-stack.ts
-          echo 'cd /home/ec2-user' >> lib/prepzo-bot-stack.ts
-          echo 'git clone https://github.com/${{ github.repository }}.git prepzo_bot' >> lib/prepzo-bot-stack.ts
-          echo 'chown -R ec2-user:ec2-user prepzo_bot' >> lib/prepzo-bot-stack.ts
-          echo 'cd prepzo_bot' >> lib/prepzo-bot-stack.ts
-          echo 'python3 -m venv venv' >> lib/prepzo-bot-stack.ts
-          echo 'source venv/bin/activate' >> lib/prepzo-bot-stack.ts
-          echo 'pip install -r requirements.txt || { echo "Error installing requirements"; cat requirements.txt; }' >> lib/prepzo-bot-stack.ts
-          echo 'pip install requests paramiko flask awscli boto3' >> lib/prepzo-bot-stack.ts
-          echo 'mkdir -p /home/ec2-user/.env' >> lib/prepzo-bot-stack.ts
-          
-          echo '# Fetch secrets from SSM Parameter Store' >> lib/prepzo-bot-stack.ts
-          echo 'cat > /home/ec2-user/.env/prepzo_bot.env << EOF' >> lib/prepzo-bot-stack.ts
-          echo 'SUPABASE_URL=$(aws ssm get-parameter --name "/prepzo-bot/SUPABASE_URL" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
-          echo 'SUPABASE_SERVICE_ROLE_KEY=$(aws ssm get-parameter --name "/prepzo-bot/SUPABASE_SERVICE_ROLE_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
-          echo 'OPENAI_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/OPENAI_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
-          echo 'DEEPGRAM_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/DEEPGRAM_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
-          echo 'LIVEKIT_URL=$(aws ssm get-parameter --name "/prepzo-bot/LIVEKIT_URL" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
-          echo 'LIVEKIT_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/LIVEKIT_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
-          echo 'CARTESIA_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/CARTESIA_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
-          echo 'ELEVENLABS_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/ELEVENLABS_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || echo "")' >> lib/prepzo-bot-stack.ts
-          echo 'HEALTH_CHECK_PORT=8080' >> lib/prepzo-bot-stack.ts
-          echo 'ENVIRONMENT=production' >> lib/prepzo-bot-stack.ts
-          echo 'GIT_COMMIT=${{ github.sha }}' >> lib/prepzo-bot-stack.ts
-          echo 'EOF' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '# Create health server' >> lib/prepzo-bot-stack.ts
-          echo 'cat > /home/ec2-user/prepzo_bot/health_server.py << EOF' >> lib/prepzo-bot-stack.ts
-          echo 'import flask' >> lib/prepzo-bot-stack.ts
-          echo 'import os' >> lib/prepzo-bot-stack.ts
-          echo 'app = flask.Flask(__name__)' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '@app.route("/health")' >> lib/prepzo-bot-stack.ts
-          echo 'def health():' >> lib/prepzo-bot-stack.ts
-          echo '    return {"status": "ok", "service": "prepzo-bot"}' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo 'if __name__ == "__main__":' >> lib/prepzo-bot-stack.ts
-          echo '    app.run(host="0.0.0.0", port=8080)' >> lib/prepzo-bot-stack.ts
-          echo 'EOF' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '# Create services' >> lib/prepzo-bot-stack.ts
-          echo 'cat > /etc/systemd/system/prepzo-health.service << EOF' >> lib/prepzo-bot-stack.ts
-          echo '[Unit]' >> lib/prepzo-bot-stack.ts
-          echo 'Description=Prepzo Health Check Service' >> lib/prepzo-bot-stack.ts
-          echo 'After=network.target' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '[Service]' >> lib/prepzo-bot-stack.ts
-          echo 'User=ec2-user' >> lib/prepzo-bot-stack.ts
-          echo 'WorkingDirectory=/home/ec2-user/prepzo_bot' >> lib/prepzo-bot-stack.ts
-          echo 'EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env' >> lib/prepzo-bot-stack.ts
-          echo 'ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python health_server.py' >> lib/prepzo-bot-stack.ts
-          echo 'Restart=always' >> lib/prepzo-bot-stack.ts
-          echo 'RestartSec=5' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '[Install]' >> lib/prepzo-bot-stack.ts
-          echo 'WantedBy=multi-user.target' >> lib/prepzo-bot-stack.ts
-          echo 'EOF' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo 'cat > /etc/systemd/system/prepzo-bot.service << EOF' >> lib/prepzo-bot-stack.ts
-          echo '[Unit]' >> lib/prepzo-bot-stack.ts
-          echo 'Description=Prepzo Bot Service' >> lib/prepzo-bot-stack.ts
-          echo 'After=network.target' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '[Service]' >> lib/prepzo-bot-stack.ts
-          echo 'User=ec2-user' >> lib/prepzo-bot-stack.ts
-          echo 'WorkingDirectory=/home/ec2-user/prepzo_bot' >> lib/prepzo-bot-stack.ts
-          echo 'EnvironmentFile=/home/ec2-user/.env/prepzo_bot.env' >> lib/prepzo-bot-stack.ts
-          echo 'ExecStart=/home/ec2-user/prepzo_bot/venv/bin/python main.py start' >> lib/prepzo-bot-stack.ts
-          echo 'Restart=always' >> lib/prepzo-bot-stack.ts
-          echo 'RestartSec=10' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '[Install]' >> lib/prepzo-bot-stack.ts
-          echo 'WantedBy=multi-user.target' >> lib/prepzo-bot-stack.ts
-          echo 'EOF' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '# Start services' >> lib/prepzo-bot-stack.ts
-          echo 'systemctl daemon-reload' >> lib/prepzo-bot-stack.ts
-          echo 'systemctl enable prepzo-health' >> lib/prepzo-bot-stack.ts
-          echo 'systemctl start prepzo-health' >> lib/prepzo-bot-stack.ts
-          echo 'systemctl enable prepzo-bot' >> lib/prepzo-bot-stack.ts
-          echo 'systemctl start prepzo-bot || echo "Main service failed to start, but health endpoint should be running"' >> lib/prepzo-bot-stack.ts
-          echo 'iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080' >> lib/prepzo-bot-stack.ts
-          echo 'echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf' >> lib/prepzo-bot-stack.ts
-          echo 'sysctl -p' >> lib/prepzo-bot-stack.ts
-          echo '`;' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '    // Add the commands to the user data' >> lib/prepzo-bot-stack.ts
-          echo '    userData.addCommands(userDataCommands);' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '    // EC2 instance' >> lib/prepzo-bot-stack.ts
-          echo '    const instance = new ec2.Instance(this, "PrepzoBotInstance", {' >> lib/prepzo-bot-stack.ts
-          echo '      vpc,' >> lib/prepzo-bot-stack.ts
-          echo '      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.SMALL),' >> lib/prepzo-bot-stack.ts
-          echo '      machineImage: ec2.MachineImage.latestAmazonLinux2023(),' >> lib/prepzo-bot-stack.ts
-          echo '      securityGroup,' >> lib/prepzo-bot-stack.ts
-          echo '      role,' >> lib/prepzo-bot-stack.ts
-          echo '      userData,' >> lib/prepzo-bot-stack.ts
-          echo '      keyName: process.env.EC2_KEY_NAME || undefined,' >> lib/prepzo-bot-stack.ts
-          echo '    });' >> lib/prepzo-bot-stack.ts
-          echo '' >> lib/prepzo-bot-stack.ts
-          echo '    // Output the instance public IP' >> lib/prepzo-bot-stack.ts
-          echo '    new cdk.CfnOutput(this, "InstancePublicIP", {' >> lib/prepzo-bot-stack.ts
-          echo '      value: instance.instancePublicIp,' >> lib/prepzo-bot-stack.ts
-          echo '      description: "The public IP address of the Prepzo Bot instance",' >> lib/prepzo-bot-stack.ts
-          echo '      exportName: "PrepzoBotInstanceIP",' >> lib/prepzo-bot-stack.ts
-          echo '    });' >> lib/prepzo-bot-stack.ts
-          echo '  }' >> lib/prepzo-bot-stack.ts
-          echo '}' >> lib/prepzo-bot-stack.ts
 
-          # Create the main entry point file
-          echo '#!/usr/bin/env node' > bin/prepzo-bot.ts
-          echo 'import "source-map-support/register";' >> bin/prepzo-bot.ts
-          echo 'import * as cdk from "aws-cdk-lib";' >> bin/prepzo-bot.ts
-          echo 'import { PrepzoBotStack } from "../lib/prepzo-bot-stack";' >> bin/prepzo-bot.ts
-          echo '' >> bin/prepzo-bot.ts
-          echo 'const app = new cdk.App();' >> bin/prepzo-bot.ts
-          echo 'new PrepzoBotStack(app, "PrepzoBotStack", {' >> bin/prepzo-bot.ts
-          echo '  env: {' >> bin/prepzo-bot.ts
-          echo '    account: process.env.CDK_DEFAULT_ACCOUNT,' >> bin/prepzo-bot.ts
-          echo '    region: "eu-north-1"' >> bin/prepzo-bot.ts
-          echo '  },' >> bin/prepzo-bot.ts
-          echo '});' >> bin/prepzo-bot.ts
-          echo 'app.synth();' >> bin/prepzo-bot.ts
-
-          # Keep the original entry point but make sure it uses our stack too
-          if [ -f "bin/infrastructure.ts" ]; then
-            echo "Modifying original entry point file to also deploy our stack..."
-            
-            # First check the original file structure
-            echo "Original infrastructure.ts content:"
-            cat bin/infrastructure.ts
-            
-            # Backup the original file
-            cp bin/infrastructure.ts bin/infrastructure.ts.bak
-            
-            # Add the import at the top properly
-            grep -q "PrepzoBotStack" bin/infrastructure.ts || sed -i '1s/^/import { PrepzoBotStack } from '\''..\/lib\/prepzo-bot-stack'\'';\n/' bin/infrastructure.ts
-            
-            # Find the line with app.synth() and add our stack before it
-            if grep -q "app\.synth\(\)" bin/infrastructure.ts; then
-              # Use awk to insert our stack before app.synth()
-              TEMP_FILE=$(mktemp)
-              awk '/app\.synth\(\)/ { print "// Add PrepzoBotStack\nnew PrepzoBotStack(app, \"PrepzoBotStack\", { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: \"eu-north-1\" } });\n"; } { print; }' bin/infrastructure.ts > "$TEMP_FILE"
-              mv "$TEMP_FILE" bin/infrastructure.ts
-            else
-              # If no app.synth(), add our stack at the end
-              echo "" >> bin/infrastructure.ts
-              echo "// Add PrepzoBotStack" >> bin/infrastructure.ts
-              echo "new PrepzoBotStack(app, 'PrepzoBotStack', { env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: 'eu-north-1' } });" >> bin/infrastructure.ts
-            fi
-            
-            # Verify the file is valid TypeScript
-            npx tsc bin/infrastructure.ts --noEmit
-            if [ $? -ne 0 ]; then
-              echo "TypeScript validation failed. Using fallback approach."
-              # Completely replace the file with a known good structure using echo commands instead of heredoc
-              echo '#!/usr/bin/env node' > bin/infrastructure.ts
-              echo 'import "source-map-support/register";' >> bin/infrastructure.ts
-              echo 'import * as cdk from "aws-cdk-lib";' >> bin/infrastructure.ts
-              echo 'import { InfrastructureStack } from "../lib/infrastructure-stack";' >> bin/infrastructure.ts
-              echo 'import { PrepzoBotStack } from "../lib/prepzo-bot-stack";' >> bin/infrastructure.ts
-              echo '' >> bin/infrastructure.ts
-              echo 'const app = new cdk.App();' >> bin/infrastructure.ts
-              echo 'new InfrastructureStack(app, "InfrastructureStack", {' >> bin/infrastructure.ts
-              echo '  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: "eu-north-1" },' >> bin/infrastructure.ts
-              echo '});' >> bin/infrastructure.ts
-              echo '' >> bin/infrastructure.ts
-              echo '// Add PrepzoBotStack' >> bin/infrastructure.ts
-              echo 'new PrepzoBotStack(app, "PrepzoBotStack", {' >> bin/infrastructure.ts
-              echo '  env: {' >> bin/infrastructure.ts
-              echo '    account: process.env.CDK_DEFAULT_ACCOUNT,' >> bin/infrastructure.ts
-              echo '    region: "eu-north-1"' >> bin/infrastructure.ts
-              echo '  }' >> bin/infrastructure.ts
-              echo '});' >> bin/infrastructure.ts
-              echo '' >> bin/infrastructure.ts
-              echo 'app.synth();' >> bin/infrastructure.ts
-            fi
-            
-            echo "Modified infrastructure.ts:"
-            cat bin/infrastructure.ts
-          fi
-
-          # Show the stack
-          echo "Available stacks after creation:"
-          npx cdk ls || echo "Failed to list stacks"
-      
-      - name: Check AWS credentials and permissions
+      - name: Install Python dependencies
         run: |
-          echo "==== Checking AWS credentials ===="
-          aws sts get-caller-identity
-          
-          echo "==== Checking AWS region ===="
-          echo "AWS_REGION: eu-north-1"
-          
-          echo "==== Checking IAM permissions ===="
-          aws iam get-user || echo "Warning: Could not get IAM user"
-          
-          echo "==== Checking EC2 permissions ===="
-          aws ec2 describe-regions --region eu-north-1 --query "Regions[0]" || echo "Warning: EC2 permission check failed"
-          
-          echo "==== Checking CloudFormation permissions ===="
-          aws cloudformation list-stacks --region eu-north-1 --query "StackSummaries[0]" || echo "Warning: CloudFormation permission check failed"
-      
-      - name: Bootstrap CDK environment
-        working-directory: ./infrastructure
+          python -m pip install --upgrade pip
+          pip install boto3 requests
+
+      - name: Update version information
         run: |
-          # Try to bootstrap with force flag
-          cdk bootstrap --force --verbose || {
-            echo "Bootstrap failed, checking if CDKToolkit stack exists in failed state..."
-            STACK_STATUS=$(aws cloudformation describe-stacks --stack-name CDKToolkit --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "DOES_NOT_EXIST")
-            
-            if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STACK_STATUS" = "CREATE_FAILED" ]; then
-              echo "Deleting failed CDKToolkit stack..."
-              aws cloudformation delete-stack --stack-name CDKToolkit
-              echo "Waiting for stack deletion to complete..."
-              aws cloudformation wait stack-delete-complete --stack-name CDKToolkit
-              
-              echo "Stack deleted, checking if S3 bucket still exists..."
-              S3_BUCKETS=$(aws s3 ls | grep cdk-hnb659fds-assets || echo "")
-              if [ -n "$S3_BUCKETS" ]; then
-                echo "Warning: S3 buckets still exist. You may need to delete them manually."
-                echo "$S3_BUCKETS"
-              fi
-              
-              echo "Retrying bootstrap..."
-              cdk bootstrap --verbose
-            else
-              echo "CDKToolkit stack status: $STACK_STATUS"
-              echo "Bootstrap failed and stack is not in a state that can be automatically fixed."
-              exit 1
-            fi
-          }
-      
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date +'%Y-%m-%d')
+          
+          # Update version.py with the git commit
+          sed -i "s/GIT_COMMIT = \"unknown\"/GIT_COMMIT = \"$GIT_COMMIT\"/" version.py
+          sed -i "s/BUILD_DATE = \".*\"/BUILD_DATE = \"$BUILD_DATE\"/" version.py
+          
+          echo "Version info updated with commit $GIT_COMMIT and build date $BUILD_DATE"
+
       - name: Store secrets in AWS Parameter Store
         run: |
-          echo "Storing secrets in AWS Parameter Store..."
-          aws ssm put-parameter --name "/prepzo-bot/SUPABASE_URL" --value "${{ secrets.SUPABASE_URL }}" --type SecureString --overwrite || echo "Warning: Failed to store SUPABASE_URL"
-          aws ssm put-parameter --name "/prepzo-bot/SUPABASE_SERVICE_ROLE_KEY" --value "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store SUPABASE_SERVICE_ROLE_KEY"
-          aws ssm put-parameter --name "/prepzo-bot/OPENAI_API_KEY" --value "${{ secrets.OPENAI_API_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store OPENAI_API_KEY"
-          aws ssm put-parameter --name "/prepzo-bot/DEEPGRAM_API_KEY" --value "${{ secrets.DEEPGRAM_API_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store DEEPGRAM_API_KEY"
-          aws ssm put-parameter --name "/prepzo-bot/LIVEKIT_URL" --value "${{ secrets.LIVEKIT_URL }}" --type SecureString --overwrite || echo "Warning: Failed to store LIVEKIT_URL"
-          aws ssm put-parameter --name "/prepzo-bot/LIVEKIT_API_KEY" --value "${{ secrets.LIVEKIT_API_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store LIVEKIT_API_KEY"
-          aws ssm put-parameter --name "/prepzo-bot/CARTESIA_API_KEY" --value "${{ secrets.CARTESIA_API_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store CARTESIA_API_KEY"
-          aws ssm put-parameter --name "/prepzo-bot/ELEVENLABS_API_KEY" --value "${{ secrets.ELEVENLABS_API_KEY }}" --type SecureString --overwrite || echo "Warning: Failed to store ELEVENLABS_API_KEY"
+          # Store all secrets in AWS Parameter Store
+          aws ssm put-parameter --name "/prepzo-bot/SUPABASE_URL" --value "${{ secrets.SUPABASE_URL }}" --type "SecureString" --overwrite || echo "Warning: Failed to store SUPABASE_URL"
+          aws ssm put-parameter --name "/prepzo-bot/SUPABASE_SERVICE_ROLE_KEY" --value "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store SUPABASE_SERVICE_ROLE_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/OPENAI_API_KEY" --value "${{ secrets.OPENAI_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store OPENAI_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/DEEPGRAM_API_KEY" --value "${{ secrets.DEEPGRAM_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store DEEPGRAM_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/LIVEKIT_URL" --value "${{ secrets.LIVEKIT_URL }}" --type "SecureString" --overwrite || echo "Warning: Failed to store LIVEKIT_URL"
+          aws ssm put-parameter --name "/prepzo-bot/LIVEKIT_API_KEY" --value "${{ secrets.LIVEKIT_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store LIVEKIT_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/CARTESIA_API_KEY" --value "${{ secrets.CARTESIA_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store CARTESIA_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/ELEVENLABS_API_KEY" --value "${{ secrets.ELEVENLABS_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store ELEVENLABS_API_KEY"
           
-      - name: Deploy CDK Stack
-        id: get-ip
-        working-directory: ./infrastructure
+          echo "Secrets stored in AWS Parameter Store"
+
+      - name: Create deployment package
         run: |
-          # Debug CDK initialization
-          echo "Created CDK project structure:"
-          ls -la
+          # Run the deployment script to create the package
+          bash scripts/deploy.sh --force
           
-          # Check default app.ts file
-          echo "Default app.ts content:"
-          cat lib/infrastructure-stack.ts || echo "File not found"
-          
-          # Add app.synth() to the PrepzoBotStack file if it doesn't exist
-          if ! grep -q "app.synth()" bin/prepzo-bot.ts; then
-            echo "Adding app.synth() to PrepzoBotStack file"
-            echo 'app.synth();' >> bin/prepzo-bot.ts
-          fi
-          
-          # Check CDK bootstrap status
-          echo "Checking CDK bootstrap status..."
-          aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].StackStatus' || echo "CDKToolkit stack not found"
-          
-          # List synthesized stacks
-          echo "Running cdk ls to see what stacks will be deployed:"
-          cdk ls
-          
-          # Deploy with verbose output
-          echo "Deploying stack (this may take several minutes)..."
-          cdk deploy --all --require-approval never --verbose
-          
-          # List all stacks after deployment
-          echo "Listing all stacks after deployment:"
-          aws cloudformation list-stacks --query 'StackSummaries[*].[StackName,StackStatus]'
-          
-          # Wait for outputs to be available
-          echo "Waiting for stack outputs to be available..."
-          sleep 10
-          
-          # List all available stacks
-          echo "Available CloudFormation stacks:"
-          aws cloudformation list-stacks --query 'StackSummaries[*].[StackName,StackStatus]'
-          
-          # Try to get instance IP from InfrastructureStack
-          echo "Attempting to get instance IP from InfrastructureStack..."
-          instance_ip=$(aws cloudformation describe-stacks \
-            --stack-name InfrastructureStack \
-            --query 'Stacks[0].Outputs[?OutputKey==`InstancePublicIP`].OutputValue' \
-            --output text)
-          
-          if [ -z "$instance_ip" ]; then
-            echo "Could not find InstancePublicIP in InfrastructureStack outputs"
-            echo "Checking all stack outputs..."
-            aws cloudformation describe-stacks --stack-name InfrastructureStack --query 'Stacks[0].Outputs'
-            
-            # Try PrepzoBotStack as fallback
-            echo "Trying PrepzoBotStack as fallback..."
-            instance_ip=$(aws cloudformation describe-stacks \
-              --stack-name PrepzoBotStack \
-              --query 'Stacks[0].Outputs[?OutputKey==`InstancePublicIP`].OutputValue' \
-              --output text 2>/dev/null || echo "")
-            
-            if [ -z "$instance_ip" ]; then
-              echo "Could not find instance IP in any stack"
-              exit 1
-            fi
-          fi
-          
-          echo "Found instance IP: $instance_ip"
-          echo "instance_ip=$instance_ip" >> $GITHUB_OUTPUT
-          
-          # Check recent CloudFormation events for any issues
-          echo "Checking recent CloudFormation events..."
-          aws cloudformation describe-stack-events \
-            --stack-name InfrastructureStack \
-            --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`].[LogicalResourceId,ResourceStatusReason]' || echo "No failed events found"
-      
-      - name: Install dependencies for verification
-        run: pip install requests
-      
-      - name: Wait for deployment to complete
+          # The script creates prepzo-bot-deployment.zip in the current directory
+
+      - name: Bootstrap CDK (if needed)
         run: |
-          # First check if instance_ip is valid
-          if [ -z "${{ steps.get-ip.outputs.instance_ip }}" ]; then
-            echo "❌ No instance IP was retrieved, deployment failed."
-            exit 1
-          fi
+          # Check if CDK is bootstrapped
+          CDK_BOOTSTRAPPED=$(aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --query "StackSummaries[?StackName=='CDKToolkit'].StackName" --output text)
           
-          # Wait for the instance to initialize and start the service (10 minutes max)
-          INSTANCE_IP="${{ steps.get-ip.outputs.instance_ip }}"
-          echo "Instance IP: $INSTANCE_IP"
-          echo "Waiting for deployment to complete and service to start..."
-          
-          # Add SSH key for debugging if provided
-          if [ -n "${{ secrets.EC2_SSH_KEY }}" ]; then
-            echo "Setting up SSH access for debugging..."
-            mkdir -p ~/.ssh
-            echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key.pem
-            chmod 600 ~/.ssh/ec2_key.pem
-            SSH_AVAILABLE=true
+          if [ -z "$CDK_BOOTSTRAPPED" ]; then
+            echo "CDK not bootstrapped. Bootstrapping now..."
+            npm install -g aws-cdk
+            cdk bootstrap aws://$(aws sts get-caller-identity --query "Account" --output text)/eu-north-1
           else
-            SSH_AVAILABLE=false
+            echo "CDK already bootstrapped"
+          fi
+
+      - name: Create S3 bucket for deployment artifacts
+        run: |
+          BUCKET_NAME="prepzo-bot-deployment-$(echo ${{ github.repository }} | tr '/' '-')"
+          
+          # Check if bucket exists
+          BUCKET_EXISTS=$(aws s3api list-buckets --query "Buckets[?Name=='${BUCKET_NAME}'].Name" --output text)
+          
+          if [ -z "$BUCKET_EXISTS" ]; then
+            echo "Creating S3 bucket: ${BUCKET_NAME}"
+            aws s3api create-bucket --bucket ${BUCKET_NAME} --create-bucket-configuration LocationConstraint=eu-north-1
+            aws s3api put-bucket-encryption --bucket ${BUCKET_NAME} --server-side-encryption-configuration '{"Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]}'
+          else
+            echo "S3 bucket ${BUCKET_NAME} already exists"
+          fi
+
+      - name: Create CodeDeploy application and deployment group
+        run: |
+          APP_NAME="PrepzoBotApplication"
+          DEPLOY_GROUP="PrepzoBotDeploymentGroup"
+          
+          # Create application if it doesn't exist
+          APP_EXISTS=$(aws deploy list-applications --query "applications[?contains(@,'${APP_NAME}')]" --output text || echo "")
+          
+          if [ -z "$APP_EXISTS" ]; then
+            echo "Creating CodeDeploy application: ${APP_NAME}"
+            aws deploy create-application --application-name ${APP_NAME}
+          else
+            echo "CodeDeploy application ${APP_NAME} already exists"
           fi
           
-          MAX_RETRIES=60  # 10 minutes total
+          # Check if deployment group exists
+          DEPLOY_GROUP_EXISTS=$(aws deploy list-deployment-groups --application-name ${APP_NAME} --query "deploymentGroups[?contains(@,'${DEPLOY_GROUP}')]" --output text 2>/dev/null || echo "")
+          
+          if [ -z "$DEPLOY_GROUP_EXISTS" ]; then
+            # Create service role for CodeDeploy if it doesn't exist
+            ROLE_ARN=$(aws iam list-roles --query "Roles[?RoleName=='CodeDeployServiceRole'].Arn" --output text)
+            
+            if [ -z "$ROLE_ARN" ]; then
+              echo "Creating CodeDeploy service role"
+              TRUST_POLICY='{
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Sid": "",
+                    "Effect": "Allow",
+                    "Principal": {
+                      "Service": "codedeploy.amazonaws.com"
+                    },
+                    "Action": "sts:AssumeRole"
+                  }
+                ]
+              }'
+              
+              aws iam create-role --role-name CodeDeployServiceRole --assume-role-policy-document "$TRUST_POLICY"
+              aws iam attach-role-policy --role-name CodeDeployServiceRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforAWSCodeDeploy
+              
+              ROLE_ARN=$(aws iam get-role --role-name CodeDeployServiceRole --query "Role.Arn" --output text)
+            fi
+            
+            # Get the EC2 instance ID with the tag "Name" containing "PrepzoBot"
+            INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=*PrepzoBot*" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].InstanceId" --output text)
+            
+            if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+              echo "No running instance found. Deploying using CDK first..."
+              # Install CDK dependencies and deploy the infrastructure
+              npm install
+              npx cdk deploy --require-approval never
+              
+              # Get the instance ID after deployment
+              INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=*PrepzoBot*" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].InstanceId" --output text)
+              
+              if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+                echo "Failed to find EC2 instance even after CDK deployment"
+                exit 1
+              fi
+            fi
+            
+            echo "Creating CodeDeploy deployment group with instance $INSTANCE_ID"
+            
+            # Create the deployment group
+            aws deploy create-deployment-group \
+              --application-name ${APP_NAME} \
+              --deployment-group-name ${DEPLOY_GROUP} \
+              --deployment-config-name CodeDeployDefault.AllAtOnce \
+              --ec2-tag-filters Key=Name,Value=*PrepzoBot*,Type=KEY_AND_VALUE \
+              --service-role-arn ${ROLE_ARN}
+              
+            echo "CodeDeploy deployment group created"
+          else
+            echo "CodeDeploy deployment group ${DEPLOY_GROUP} already exists"
+          fi
+
+      - name: Upload deployment package to S3
+        run: |
+          GIT_COMMIT=$(git rev-parse HEAD)
+          BUCKET_NAME="prepzo-bot-deployment-$(echo ${{ github.repository }} | tr '/' '-')"
+          S3_LOCATION="s3://${BUCKET_NAME}/${GIT_COMMIT}.zip"
+          
+          echo "Uploading deployment package to ${S3_LOCATION}..."
+          aws s3 cp prepzo-bot-deployment.zip ${S3_LOCATION}
+
+      - name: Deploy with CodeDeploy
+        run: |
+          GIT_COMMIT=$(git rev-parse HEAD)
+          BUCKET_NAME="prepzo-bot-deployment-$(echo ${{ github.repository }} | tr '/' '-')"
+          
+          echo "Creating deployment with CodeDeploy..."
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name PrepzoBotApplication \
+            --deployment-group-name PrepzoBotDeploymentGroup \
+            --s3-location bucket=${BUCKET_NAME},bundleType=zip,key=${GIT_COMMIT}.zip \
+            --file-exists-behavior OVERWRITE \
+            --query "deploymentId" --output text)
+          
+          echo "Deployment started with ID: ${DEPLOYMENT_ID}"
+          
+          # Monitor deployment status
+          echo "Monitoring deployment status..."
+          MAX_RETRIES=30
           RETRY_INTERVAL=10
           
           for i in $(seq 1 $MAX_RETRIES); do
-            echo "Attempt $i of $MAX_RETRIES..."
+            echo "Checking deployment status (attempt $i of $MAX_RETRIES)..."
+            DEPLOYMENT_STATUS=$(aws deploy get-deployment --deployment-id ${DEPLOYMENT_ID} --query "deploymentInfo.status" --output text)
             
-            # Try to access the health endpoint on both HTTP and HTTPS
-            echo "Checking health endpoint (HTTP): http://$INSTANCE_IP/health"
-            HTTP_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://$INSTANCE_IP/health || echo "error")
+            echo "Current status: ${DEPLOYMENT_STATUS}"
             
-            echo "Checking health endpoint (HTTPS): https://$INSTANCE_IP/health"
-            HTTPS_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --insecure https://$INSTANCE_IP/health || echo "error")
-            
-            # Also try port 8080 directly
-            echo "Checking health endpoint on port 8080: http://$INSTANCE_IP:8080/health"
-            PORT_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://$INSTANCE_IP:8080/health || echo "error")
-            
-            if [ "$HTTP_RESPONSE" == "200" ] || [ "$HTTPS_RESPONSE" == "200" ] || [ "$PORT_RESPONSE" == "200" ]; then
-              echo "✅ Service is up and running!"
-              echo "Deployment successful."
-              exit 0
+            if [ "$DEPLOYMENT_STATUS" == "Succeeded" ]; then
+              echo "✅ Deployment successful!"
+              break
+            elif [ "$DEPLOYMENT_STATUS" == "Failed" ] || [ "$DEPLOYMENT_STATUS" == "Stopped" ]; then
+              echo "❌ Deployment failed or was stopped"
+              aws deploy get-deployment --deployment-id ${DEPLOYMENT_ID}
+              exit 1
             fi
             
-            echo "Service not ready yet (HTTP: $HTTP_RESPONSE, HTTPS: $HTTPS_RESPONSE, Port 8080: $PORT_RESPONSE), waiting $RETRY_INTERVAL seconds..."
-            
-            # Every 5 attempts (50 seconds), try to get more debugging info
-            if [ $((i % 5)) -eq 0 ]; then
-              echo "------- Debugging Information -------"
-              # Try to check port 80 connectivity
-              echo "Checking if port 80 is open..."
-              nc -zv $INSTANCE_IP 80 -w 5 || echo "Port 80 connection failed"
-              
-              # Try port 8080 directly
-              echo "Checking if port 8080 is open..."
-              nc -zv $INSTANCE_IP 8080 -w 5 || echo "Port 8080 connection failed"
-              
-              # If SSH is available, try to get logs from the instance
-              if [ "$SSH_AVAILABLE" = true ]; then
-                echo "Checking service status via SSH..."
-                ssh -o StrictHostKeyChecking=no -i ~/.ssh/ec2_key.pem ec2-user@$INSTANCE_IP "sudo systemctl status prepzo-bot" || echo "Failed to get service status"
-                
-                echo "Checking service logs..."
-                ssh -o StrictHostKeyChecking=no -i ~/.ssh/ec2_key.pem ec2-user@$INSTANCE_IP "sudo journalctl -u prepzo-bot --no-pager -n 50" || echo "Failed to get service logs"
-                
-                echo "Checking if health endpoint is running on the instance..."
-                ssh -o StrictHostKeyChecking=no -i ~/.ssh/ec2_key.pem ec2-user@$INSTANCE_IP "curl -v localhost:8080/health" || echo "Health endpoint not accessible locally"
-              fi
-              echo "------------------------------------"
+            if [ $i -eq $MAX_RETRIES ]; then
+              echo "Deployment is still in progress. The GitHub Action will complete, but deployment may still be ongoing."
+              break
             fi
             
-            sleep $RETRY_INTERVAL
+            sleep ${RETRY_INTERVAL}
           done
-          
-          echo "❌ Deployment verification timed out after 10 minutes"
-          echo "You may need to check the instance manually at: $INSTANCE_IP"
-          echo "Health endpoint should be available at: http://$INSTANCE_IP/health"
-          exit 1
-      
-      - name: Notify deployment status
-        if: always()
+
+      - name: Verify deployment
         run: |
-          if [ ${{ job.status }} == 'success' ]; then
-            echo "✅ Deployment completed successfully!"
-            echo "Instance IP: ${{ steps.get-ip.outputs.instance_ip }}"
-            echo "Health check available at: http://${{ steps.get-ip.outputs.instance_ip }}/health"
-          else
-            echo "❌ Deployment failed!"
-          fi 
+          # Get instance IP
+          INSTANCE_IP=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=*PrepzoBot*" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          
+          if [ -z "$INSTANCE_IP" ] || [ "$INSTANCE_IP" == "None" ]; then
+            echo "Error: Could not find instance IP"
+            exit 1
+          fi
+          
+          echo "Instance IP: $INSTANCE_IP"
+          
+          # Run the deployment check script
+          python scripts/check_deployment.py --ip $INSTANCE_IP --app PrepzoBotApplication --group PrepzoBotDeploymentGroup 

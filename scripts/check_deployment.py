@@ -1,120 +1,152 @@
-#!/usr/bin/env python3
-"""
-Script to check the status of Prepzo Bot deployment on EC2
-"""
+#!/usr/bin/env python
+'''
+Check if the deployment has completed successfully
+'''
 
 import argparse
-import requests
 import json
-import os
+import requests
+import time
 import sys
 from datetime import datetime
 
-def check_instance_status(instance_ip, port=80):
-    """Check if the instance is responding to HTTP requests"""
-    try:
-        url = f"http://{instance_ip}:{port}/health"
-        print(f"Checking status at {url}...")
-        
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            print(f"✅ Server is up and running! Status code: {response.status_code}")
-            try:
-                data = response.json()
-                print(f"Server info: {json.dumps(data, indent=2)}")
-                return True
-            except:
-                print("Server responded but did not return valid JSON")
-                return True
-        else:
-            print(f"❌ Server returned status code {response.status_code}")
-            return False
-    except requests.exceptions.ConnectionError:
-        print(f"❌ Connection error - server may not be running")
-        return False
-    except requests.exceptions.Timeout:
-        print(f"❌ Request timed out - server may be overloaded")
-        return False
-    except Exception as e:
-        print(f"❌ Error checking server: {str(e)}")
-        return False
 
-def check_service_status(instance_ip, ssh_key, username="ec2-user"):
-    """Check the status of the bot service via SSH"""
+def check_endpoint(ip, endpoint="/health", port=8080, max_retries=10, retry_interval=5):
+    """
+    Check if the application's health endpoint is responding
+    """
+    url = f"http://{ip}:{port}{endpoint}"
+    print(f"Checking health at {url}")
+    
+    for i in range(max_retries):
+        try:
+            print(f"Attempt {i+1}/{max_retries}...")
+            response = requests.get(url, timeout=5)
+            
+            if response.status_code == 200:
+                try:
+                    health_data = response.json()
+                    print(f"✅ Health check succeeded!")
+                    print(f"Status: {health_data.get('status', 'unknown')}")
+                    print(f"Service: {health_data.get('service', 'unknown')}")
+                    
+                    version_info = health_data.get('version', {})
+                    if isinstance(version_info, dict):
+                        print(f"Version: {version_info.get('version', 'unknown')}")
+                        print(f"Build date: {version_info.get('build_date', 'unknown')}")
+                        print(f"Git commit: {version_info.get('git_commit', 'unknown')}")
+                    else:
+                        print(f"Version: {version_info}")
+                    
+                    return True
+                except (json.JSONDecodeError, ValueError):
+                    print(f"Warning: Received non-JSON response")
+                    print(response.text[:100])  # Show first 100 chars of response
+                    return True
+            else:
+                print(f"Got HTTP {response.status_code} response")
+                
+        except requests.RequestException as e:
+            print(f"Request failed: {e}")
+            
+        if i < max_retries - 1:
+            print(f"Retrying in {retry_interval} seconds...")
+            time.sleep(retry_interval)
+    
+    return False
+
+
+def check_aws_deployment_status(application_name, deployment_group):
+    """
+    Check the status of the most recent CodeDeploy deployment
+    """
     try:
-        import paramiko
+        import boto3
+        from botocore.exceptions import ClientError
         
-        print(f"Connecting to {instance_ip} via SSH...")
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client = boto3.client('codedeploy')
         
-        # Connect to the server
-        client.connect(instance_ip, username=username, key_filename=ssh_key)
-        
-        # Check systemd service status
-        print("Checking bot service status...")
-        stdin, stdout, stderr = client.exec_command('sudo systemctl status prepzo-bot')
-        service_status = stdout.read().decode('utf-8')
-        print("\n--- Service Status ---")
-        print(service_status)
-        print("---------------------\n")
-        
-        # Check logs
-        print("Checking recent logs...")
-        stdin, stdout, stderr = client.exec_command('sudo journalctl -u prepzo-bot -n 20')
-        logs = stdout.read().decode('utf-8')
-        print("\n--- Recent Logs ---")
-        print(logs)
-        print("-------------------\n")
-        
-        # Close the connection
-        client.close()
-        
-        if "Active: active (running)" in service_status:
-            print("✅ Prepzo Bot service is running")
-            return True
-        else:
-            print("❌ Prepzo Bot service is not running")
+        # Get the most recent deployment
+        try:
+            response = client.list_deployments(
+                applicationName=application_name,
+                deploymentGroupName=deployment_group,
+                includeOnlyStatuses=['Created', 'Queued', 'InProgress', 'Succeeded', 'Failed', 'Stopped', 'Ready'],
+                limit=1
+            )
+            
+            if not response.get('deployments'):
+                print(f"No deployments found for {application_name}/{deployment_group}")
+                return False
+            
+            deployment_id = response['deployments'][0]
+            
+            # Get deployment info
+            deployment = client.get_deployment(deploymentId=deployment_id)
+            status = deployment['deploymentInfo']['status']
+            create_time = deployment['deploymentInfo']['createTime']
+            
+            # Format time nicely
+            formatted_time = datetime.fromtimestamp(create_time.timestamp()).strftime('%Y-%m-%d %H:%M:%S')
+            
+            print(f"Latest deployment ({deployment_id}):")
+            print(f"  Status: {status}")
+            print(f"  Created: {formatted_time}")
+            
+            if status == 'Succeeded':
+                print("✅ Deployment completed successfully!")
+                return True
+            elif status in ['Failed', 'Stopped']:
+                print("❌ Deployment failed or was stopped")
+                # Get error information if available
+                if 'errorInformation' in deployment['deploymentInfo']:
+                    print(f"  Error code: {deployment['deploymentInfo']['errorInformation'].get('code', 'unknown')}")
+                    print(f"  Error message: {deployment['deploymentInfo']['errorInformation'].get('message', 'unknown')}")
+                return False
+            else:
+                print(f"Deployment is {status}")
+                return None  # Still in progress
+            
+        except ClientError as e:
+            print(f"Error getting deployment status: {e}")
             return False
+            
     except ImportError:
-        print("Could not import paramiko. Install it with: pip install paramiko")
-        return False
-    except Exception as e:
-        print(f"❌ SSH connection error: {str(e)}")
-        return False
+        print("AWS boto3 library not installed. Can't check CodeDeploy status.")
+        return None
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Check Prepzo Bot deployment status")
-    parser.add_argument("--ip", required=True, help="EC2 instance public IP address")
-    parser.add_argument("--ssh-key", help="Path to SSH key for instance access")
-    parser.add_argument("--port", type=int, default=80, help="Server port (default: 80)")
-    parser.add_argument("--username", default="ec2-user", help="SSH username (default: ec2-user)")
-    
+    parser = argparse.ArgumentParser(description='Check deployment status')
+    parser.add_argument('--ip', required=True, help='IP address of the deployed instance')
+    parser.add_argument('--port', type=int, default=8080, help='Port for health check (default: 8080)')
+    parser.add_argument('--app', default='PrepzoBotApplication', help='CodeDeploy application name')
+    parser.add_argument('--group', default='PrepzoBotDeploymentGroup', help='CodeDeploy deployment group')
+    parser.add_argument('--retries', type=int, default=10, help='Maximum number of retries')
+    parser.add_argument('--interval', type=int, default=5, help='Seconds between retries')
     args = parser.parse_args()
     
-    print(f"Checking deployment status at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Instance IP: {args.ip}")
+    # First check AWS deployment status if possible
+    aws_status = check_aws_deployment_status(args.app, args.group)
     
-    # First check HTTP status
-    http_status = check_instance_status(args.ip, args.port)
+    if aws_status is False:
+        print("AWS deployment check failed. Still checking service health...")
     
-    # Then check service status if SSH key is provided
-    service_status = False
-    if args.ssh_key:
-        if os.path.exists(args.ssh_key):
-            service_status = check_service_status(args.ip, args.ssh_key, args.username)
-        else:
-            print(f"❌ SSH key file not found: {args.ssh_key}")
-    else:
-        print("SSH key not provided, skipping service status check")
+    # Then check the actual endpoint
+    health_status = check_endpoint(
+        args.ip, 
+        port=args.port,
+        max_retries=args.retries,
+        retry_interval=args.interval
+    )
     
-    # Overall status
-    if http_status and (service_status or not args.ssh_key):
-        print("\n✅ Deployment appears to be successful!")
+    if health_status:
+        print("\nService is up and running correctly!")
         return 0
     else:
-        print("\n❌ Deployment has issues that need to be addressed")
+        print("\nService health check failed!")
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main()) 
