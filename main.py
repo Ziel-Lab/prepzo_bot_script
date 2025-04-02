@@ -368,33 +368,32 @@ async def store_conversation_message(session_id, participant_id, message_data):
         logger.error("Message data is empty, skipping storage")
         return False
     
-    # Create a local backup of the message before attempting to store in Supabase
+    # Create a message ID if not present
     message_id = message_data.get("message_id", str(uuid.uuid4()))
     
     # Update message data to ensure it has a message_id
     if "message_id" not in message_data:
         message_data["message_id"] = message_id
-        
-    # Create local backup
-    try:
-        backup_file = LOCAL_BACKUP_DIR / f"{session_id}_{message_id}.json"
-        LOCAL_BACKUP_DIR.mkdir(exist_ok=True, parents=True)
-        
-        with open(backup_file, 'w') as f:
-            json.dump({
-                "session_id": session_id,
-                "participant_id": participant_id,
-                "message_data": message_data
-            }, f)
-        verbose_log(f"Created local backup at {backup_file}", level="debug")
-    except Exception as e:
-        logger.error(f"Failed to create local backup: {e}")
     
     # Prepare data for insertion following Supabase documentation pattern
+    # Ensure we're using a serializable format for message_data
+    try:
+        serialized_message_data = json.dumps(message_data) if isinstance(message_data, dict) else message_data
+    except TypeError as e:
+        logger.error(f"Failed to serialize message data: {e}")
+        # Create a simplified version without problematic fields
+        safe_message = {
+            "role": message_data.get("role", "unknown"),
+            "content": message_data.get("content", ""),
+            "timestamp": message_data.get("timestamp", get_current_timestamp()),
+            "message_id": message_id
+        }
+        serialized_message_data = json.dumps(safe_message)
+    
     insert_data = {
         "session_id": session_id,
         "participant_id": participant_id,
-        "message_data": json.dumps(message_data) if isinstance(message_data, dict) else message_data,
+        "message_data": serialized_message_data,
         "message_id": message_id,
         "transcript": message_data.get("content", ""),  # Store transcript in separate column
         "timestamp": message_data.get("timestamp", get_current_timestamp()),
@@ -415,15 +414,6 @@ async def store_conversation_message(session_id, participant_id, message_data):
         # Check response structure following Supabase pattern
         if hasattr(response, 'data') and response.data:
             logger.info(f"Successfully stored message with ID: {message_id}")
-            
-            # Clean up the backup file
-            try:
-                if backup_file.exists():
-                    backup_file.unlink()
-                    verbose_log(f"Removed backup file after successful storage: {backup_file}", level="debug")
-            except Exception as e:
-                logger.error(f"Failed to remove backup file: {e}")
-                
             return True
         elif hasattr(response, 'error') and response.error:
             logger.error(f"Supabase upsert error: {response.error}")
@@ -494,19 +484,49 @@ async def store_full_conversation():
             # If message doesn't have a message_id yet, add one
             if "message_id" not in message:
                 message["message_id"] = str(uuid.uuid4())
-                
-            # Prepare the message for storage
-            insert_data = {
-                "session_id": session_id,
-                "participant_id": message.get("participant_id", message.get("role", "unknown")),
-                "message_data": json.dumps(message) if isinstance(message, dict) else message,
-                "message_id": message.get("message_id"),
-                "transcript": message.get("content", ""),
-                "timestamp": message.get("timestamp", get_current_timestamp()),
-                "role": message.get("role", "unknown"),
-            }
             
-            messages_to_store.append(insert_data)
+            # Prepare the message for storage with serialization error handling
+            try:
+                # Ensure we're using a serializable format for message_data
+                serialized_message = json.dumps(message) if isinstance(message, dict) else message
+                
+                insert_data = {
+                    "session_id": session_id,
+                    "participant_id": message.get("participant_id", message.get("role", "unknown")),
+                    "message_data": serialized_message,
+                    "message_id": message.get("message_id"),
+                    "transcript": message.get("content", ""),
+                    "timestamp": message.get("timestamp", get_current_timestamp()),
+                    "role": message.get("role", "unknown"),
+                }
+                
+                messages_to_store.append(insert_data)
+            except TypeError as e:
+                logger.error(f"Failed to serialize message for batch storage: {e}")
+                # Create a safe version without problematic fields
+                try:
+                    safe_message = {
+                        "role": message.get("role", "unknown"),
+                        "content": message.get("content", ""),
+                        "timestamp": message.get("timestamp", get_current_timestamp()),
+                        "message_id": message.get("message_id")
+                    }
+                    
+                    serialized_safe_message = json.dumps(safe_message)
+                    
+                    insert_data = {
+                        "session_id": session_id,
+                        "participant_id": message.get("participant_id", message.get("role", "unknown")),
+                        "message_data": serialized_safe_message,
+                        "message_id": message.get("message_id"),
+                        "transcript": message.get("content", ""),
+                        "timestamp": message.get("timestamp", get_current_timestamp()),
+                        "role": message.get("role", "unknown"),
+                    }
+                    
+                    messages_to_store.append(insert_data)
+                except Exception as safe_err:
+                    logger.error(f"Could not create safe version of message: {safe_err}")
         
         # Store messages in batches to avoid overwhelming Supabase
         batch_size = 10
@@ -572,18 +592,7 @@ async def store_full_conversation():
         logger.error(f"Failed to store full conversation: {str(e)}")
         logger.error(f"Error type: {type(e)}")
         logger.error(f"Full error details: {repr(e)}")
-        
-        # Create emergency backup of any unsaved messages
-        try:
-            emergency_backup = [msg for msg in conversation_history if not msg.get("metadata", {}).get("stored", False)]
-            if emergency_backup:
-                backup_file = LOCAL_BACKUP_DIR / f"emergency_backup_{session_id}_{int(time.time())}.json"
-                LOCAL_BACKUP_DIR.mkdir(exist_ok=True, parents=True)
-                with open(backup_file, 'w') as f:
-                    json.dump(emergency_backup, f, indent=2)
-                logger.info(f"Created emergency backup at {backup_file} with {len(emergency_backup)} messages")
-        except Exception as backup_err:
-            logger.error(f"Failed to create emergency backup: {backup_err}")
+        # Emergency backup disabled to prevent serialization errors
 
 # Add a helper method to directly await the storage task when critical
 async def ensure_storage_completed():
@@ -1122,8 +1131,14 @@ async def entrypoint(ctx: JobContext):
         raise
 
 async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
-    global conversation_history, session_id, timeout_task, periodic_saver_task
-    global retry_processor_task  # Add this global declaration
+    global conversation_history, session_id, timeout_task
+    global retry_processor_task, periodic_saver_task  # Ensure all tasks are properly declared
+    
+    # Initialize task variables to None
+    timeout_task = None
+    periodic_saver_task = None
+    retry_processor_task = None
+    connection_checker_task = None
     
     try:
         # Capture initial metadata to associate with transcript
@@ -1799,35 +1814,41 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
     finally:
         # Cleanup tasks
         try:
-            # Cancel any running tasks
-            if timeout_task:
-                timeout_task.cancel()
-            if periodic_saver_task:
-                periodic_saver_task.cancel()
-            if retry_processor_task:
-                retry_processor_task.cancel()
-            if 'connection_checker_task' in locals() and connection_checker_task:
-                connection_checker_task.cancel()
-                
-            await ensure_storage_completed()
+            # Cancel any running tasks - safely handle task cancellation
+            tasks_to_cancel = [
+                ('timeout_task', timeout_task),
+                ('periodic_saver_task', periodic_saver_task),
+                ('retry_processor_task', retry_processor_task),
+                ('connection_checker_task', connection_checker_task if 'connection_checker_task' in locals() else None)
+            ]
+            
+            for task_name, task in tasks_to_cancel:
+                if task and not task.done():
+                    try:
+                        task.cancel()
+                        logger.info(f"Cancelled {task_name}")
+                    except Exception as e:
+                        logger.error(f"Error cancelling {task_name}: {e}")
+            
+            # Ensure storage completes without creating backups
+            try:
+                await ensure_storage_completed()
+            except Exception as e:
+                logger.error(f"Error during final storage: {e}")
             
             # Process any remaining items in the retry queue
-            if retry_queue:
-                await process_retry_queue()
+            try:
+                if retry_queue:
+                    await process_retry_queue()
+            except Exception as e:
+                logger.error(f"Error processing retry queue during shutdown: {e}")
             
             # Final log for debugging
             logger.info(f"Agent shutdown complete, {len(conversation_history)} messages in conversation history")
             
         except Exception as e:
             logger.error(f"Error during agent shutdown: {e}")
-            # In case of shutdown errors, try to save conversation history to local backup
-            try:
-                backup_path = LOCAL_BACKUP_DIR / f"shutdown_backup_{session_id}.json"
-                with open(backup_path, 'w') as f:
-                    json.dump(conversation_history, f, indent=2)
-                logger.info(f"Saved shutdown backup to {backup_path}")
-            except Exception as backup_err:
-                logger.error(f"Failed to create shutdown backup: {backup_err}")
+            # Skip creating local backup to avoid serialization errors
 
 # Initialize the OpenAI and Gemini APIs
 def init_apis():
@@ -1991,72 +2012,52 @@ async def query_pinecone_knowledge_base(query: str, top_k: int = 3):
 
 # --- End Pinecone --- #
 
-# Initialize local backup directory
+# Initialize local backup directory - DISABLED to avoid file serialization issues
 def init_local_backup():
-    """Create local backup directory for conversation storage"""
-    try:
-        if not LOCAL_BACKUP_DIR.exists():
-            LOCAL_BACKUP_DIR.mkdir(parents=True)
-            logger.info(f"Created local backup directory at {LOCAL_BACKUP_DIR.absolute()}")
-        
-        # Load any existing retry queue
-        global retry_queue
-        if RETRY_QUEUE_FILE.exists():
-            try:
-                with open(RETRY_QUEUE_FILE, 'rb') as f:
-                    retry_queue = pickle.load(f)
-                    logger.info(f"Loaded {len(retry_queue)} messages from retry queue")
-            except Exception as e:
-                logger.error(f"Failed to load retry queue: {e}")
-                retry_queue = []
-        
-        return True
-    except Exception as e:
-        logger.error(f"Failed to initialize local backup: {e}")
-        return False
+    """This function is disabled to prevent serialization errors"""
+    logger.info("Local backup functionality is disabled")
+    return True
 
-# Save retry queue to disk
+# Save retry queue to disk - DISABLED to avoid file serialization issues
 def save_retry_queue():
-    """Save current retry queue to disk"""
-    if not LOCAL_BACKUP_DIR.exists():
-        try:
-            LOCAL_BACKUP_DIR.mkdir(parents=True)
-        except Exception as e:
-            logger.error(f"Failed to create backup directory: {e}")
-            return False
-    
-    try:
-        with open(RETRY_QUEUE_FILE, 'wb') as f:
-            pickle.dump(retry_queue, f)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to save retry queue: {e}")
-        return False
+    """This function is disabled to prevent serialization errors"""
+    # Logging disabled to avoid log spam
+    return True
 
 # Add a message to retry queue
 def add_to_retry_queue(session_id, participant_id, message_data):
-    """Add a failed message to the retry queue"""
+    """Add a failed message to the retry queue (in-memory only)"""
     global retry_queue
     
-    # Create a retry item with timestamp
-    retry_item = {
-        "timestamp": datetime.now().isoformat(),
-        "session_id": session_id,
-        "participant_id": participant_id,
-        "message_data": message_data,
-        "retry_count": 0
-    }
-    
-    # Add to queue and trim if too large
-    retry_queue.append(retry_item)
-    if len(retry_queue) > MAX_RETRY_QUEUE_SIZE:
-        retry_queue = retry_queue[-MAX_RETRY_QUEUE_SIZE:]  # Keep only the newest messages
-    
-    # Save queue to disk
-    save_retry_queue()
-    logger.info(f"Added message to retry queue (queue size: {len(retry_queue)})")
-    
-    return True
+    # Make a safe copy of the message data to avoid serialization issues
+    try:
+        # First try to extract only the essential data to avoid coroutines
+        safe_message = {
+            "role": message_data.get("role", "unknown"),
+            "content": message_data.get("content", ""),
+            "timestamp": message_data.get("timestamp", get_current_timestamp()),
+            "message_id": message_data.get("message_id", str(uuid.uuid4()))
+        }
+        
+        # Create a retry item with timestamp
+        retry_item = {
+            "timestamp": datetime.now().isoformat(),
+            "session_id": session_id,
+            "participant_id": participant_id,
+            "message_data": safe_message,
+            "retry_count": 0
+        }
+        
+        # Add to queue and trim if too large
+        retry_queue.append(retry_item)
+        if len(retry_queue) > MAX_RETRY_QUEUE_SIZE:
+            retry_queue = retry_queue[-MAX_RETRY_QUEUE_SIZE:]  # Keep only the newest messages
+        
+        logger.info(f"Added message to retry queue (queue size: {len(retry_queue)})")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to add message to retry queue: {e}")
+        return False
 
 # Add a dedicated retry processor with adjustable batch size
 async def process_retry_queue(batch_size=10):
@@ -2090,15 +2091,6 @@ async def process_retry_queue(batch_size=10):
         # Skip items that have been retried too many times
         if item.get("retry_count", 0) >= 5:
             logger.warning(f"Skipping message that has failed {item['retry_count']} times")
-            
-            # Archive permanently failed message to disk
-            try:
-                failed_file = LOCAL_BACKUP_DIR / f"failed_{item['session_id']}_{uuid.uuid4()}.json"
-                with open(failed_file, 'w') as f:
-                    json.dump(item, f, indent=2)
-            except Exception as e:
-                logger.error(f"Failed to archive permanently failed message: {e}")
-                
             continue
             
         # Attempt to store the message - note the function is still async but internally handles
@@ -2137,9 +2129,6 @@ async def process_retry_queue(batch_size=10):
         # Yield control back to the event loop more frequently
         await asyncio.sleep(0.2)
     
-    # Save updated retry queue
-    save_retry_queue()
-    
     logger.info(f"Retry queue processing: {success_count}/{processed_count} messages stored, {len(retry_queue)} remaining")
     
     return success_count
@@ -2168,7 +2157,10 @@ async def periodic_retry_processor():
             # Only process when supabase is connected and retry queue has items
             if await init_supabase():
                 # Process a smaller batch size to reduce impact
-                await process_retry_queue(batch_size=5)
+                try:
+                    await process_retry_queue(batch_size=5)
+                except Exception as e:
+                    logger.error(f"Error during periodic retry processing: {e}")
             else:
                 logger.warning("Skipping retry processing due to Supabase connection issues")
             
