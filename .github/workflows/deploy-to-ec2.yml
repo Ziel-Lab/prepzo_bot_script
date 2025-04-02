@@ -60,12 +60,21 @@ jobs:
           # Store all secrets in AWS Parameter Store
           aws ssm put-parameter --name "/prepzo-bot/SUPABASE_URL" --value "${{ secrets.SUPABASE_URL }}" --type "SecureString" --overwrite || echo "Warning: Failed to store SUPABASE_URL"
           aws ssm put-parameter --name "/prepzo-bot/SUPABASE_SERVICE_ROLE_KEY" --value "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store SUPABASE_SERVICE_ROLE_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/SUPABASE_KEY" --value "${{ secrets.SUPABASE_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store SUPABASE_KEY"
           aws ssm put-parameter --name "/prepzo-bot/OPENAI_API_KEY" --value "${{ secrets.OPENAI_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store OPENAI_API_KEY"
           aws ssm put-parameter --name "/prepzo-bot/DEEPGRAM_API_KEY" --value "${{ secrets.DEEPGRAM_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store DEEPGRAM_API_KEY"
           aws ssm put-parameter --name "/prepzo-bot/LIVEKIT_URL" --value "${{ secrets.LIVEKIT_URL }}" --type "SecureString" --overwrite || echo "Warning: Failed to store LIVEKIT_URL"
           aws ssm put-parameter --name "/prepzo-bot/LIVEKIT_API_KEY" --value "${{ secrets.LIVEKIT_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store LIVEKIT_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/LIVEKIT_API_SECRET" --value "${{ secrets.LIVEKIT_API_SECRET }}" --type "SecureString" --overwrite || echo "Warning: Failed to store LIVEKIT_API_SECRET"
           aws ssm put-parameter --name "/prepzo-bot/CARTESIA_API_KEY" --value "${{ secrets.CARTESIA_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store CARTESIA_API_KEY"
           aws ssm put-parameter --name "/prepzo-bot/ELEVENLABS_API_KEY" --value "${{ secrets.ELEVENLABS_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store ELEVENLABS_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/SERPAPI_KEY" --value "${{ secrets.SERPAPI_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store SERPAPI_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/GEMINI_API_KEY" --value "${{ secrets.GEMINI_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store GEMINI_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/PINECONE_API_KEY" --value "${{ secrets.PINECONE_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store PINECONE_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/PINECONE_REGION" --value "${{ secrets.PINECONE_REGION }}" --type "SecureString" --overwrite || echo "Warning: Failed to store PINECONE_REGION"
+          aws ssm put-parameter --name "/prepzo-bot/PINECONE_HOST" --value "${{ secrets.PINECONE_HOST }}" --type "SecureString" --overwrite || echo "Warning: Failed to store PINECONE_HOST"
+          aws ssm put-parameter --name "/prepzo-bot/GOOGLE_API_KEY" --value "${{ secrets.GOOGLE_API_KEY }}" --type "SecureString" --overwrite || echo "Warning: Failed to store GOOGLE_API_KEY"
+          aws ssm put-parameter --name "/prepzo-bot/GOOGLE_APPLICATION_CREDENTIALS" --value "${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}" --type "SecureString" --overwrite || echo "Warning: Failed to store GOOGLE_APPLICATION_CREDENTIALS"
           
           echo "Secrets stored in AWS Parameter Store"
 
@@ -565,12 +574,21 @@ jobs:
           cat > /home/ec2-user/.env/prepzo_bot.env << 'ENV_EOF'
           SUPABASE_URL=$(aws ssm get-parameter --name "/prepzo-bot/SUPABASE_URL" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
           SUPABASE_SERVICE_ROLE_KEY=$(aws ssm get-parameter --name "/prepzo-bot/SUPABASE_SERVICE_ROLE_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          SUPABASE_KEY=$(aws ssm get-parameter --name "/prepzo-bot/SUPABASE_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
           OPENAI_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/OPENAI_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
           DEEPGRAM_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/DEEPGRAM_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
           LIVEKIT_URL=$(aws ssm get-parameter --name "/prepzo-bot/LIVEKIT_URL" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
           LIVEKIT_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/LIVEKIT_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          LIVEKIT_API_SECRET=$(aws ssm get-parameter --name "/prepzo-bot/LIVEKIT_API_SECRET" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
           CARTESIA_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/CARTESIA_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
           ELEVENLABS_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/ELEVENLABS_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          SERPAPI_KEY=$(aws ssm get-parameter --name "/prepzo-bot/SERPAPI_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          GEMINI_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/GEMINI_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          PINECONE_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/PINECONE_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          PINECONE_REGION=$(aws ssm get-parameter --name "/prepzo-bot/PINECONE_REGION" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          PINECONE_HOST=$(aws ssm get-parameter --name "/prepzo-bot/PINECONE_HOST" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          GOOGLE_API_KEY=$(aws ssm get-parameter --name "/prepzo-bot/GOOGLE_API_KEY" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
+          GOOGLE_APPLICATION_CREDENTIALS=$(aws ssm get-parameter --name "/prepzo-bot/GOOGLE_APPLICATION_CREDENTIALS" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
           ENV_EOF
           
           # Set environment variables now for testing

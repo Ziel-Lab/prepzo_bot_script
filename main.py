@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import asyncio
 import json
 import logging
@@ -13,7 +12,6 @@ from datetime import datetime, timezone
 import ipaddress
 import requests
 from urllib.parse import urlparse
-
 from livekit import rtc
 from livekit.agents import (
     AutoSubscribe,
@@ -24,9 +22,10 @@ from livekit.agents import (
     cli,
     llm,
     metrics,
+    multimodal
 )
 from livekit.agents.pipeline import VoicePipelineAgent
-from livekit.plugins import deepgram, openai, silero
+from livekit.plugins import deepgram, openai, silero, google
 from livekit.plugins.openai import tts as openai_tts
 from livekit.agents.llm import ChatMessage, ChatImage
 from supabase import create_client, Client
@@ -35,6 +34,9 @@ from dotenv import load_dotenv
 import prompt
 from openai import OpenAI
 import version
+import google.generativeai as genai
+from google.genai import types
+from pinecone import Pinecone, ServerlessSpec # Import Pinecone
 
 logger = logging.getLogger("my-worker")
 logger.setLevel(logging.INFO)
@@ -42,8 +44,24 @@ logger.setLevel(logging.INFO)
 # Initialize Supabase client
 supabase: Client = None
 
-# Initialize OpenAI client for web search
+# Initialize OpenAI client for web search and embeddings
 openai_client: OpenAI = None
+
+# Initialize Gemini API flag
+gemini_initialized: bool = False
+
+# Initialize Pinecone client and index
+pinecone_client: Pinecone = None
+pinecone_index = None
+PINECONE_INDEX_NAME = "coachingbooks"
+EMBEDDING_MODEL = "text-embedding-3-large" # Match the index
+
+# Global variables for conversation tracking
+conversation_history = []
+session_id = None
+user_message = ""
+timeout_task = None
+agent = None
 
 # OpenAI TTS configuration
 OPENAI_VOICE_ID = "alloy"  
@@ -61,92 +79,142 @@ def get_utc_now():
         # Fallback for earlier Python versions
         return datetime.now(timezone.utc)
 
-async def perform_web_search(query: str, search_context_size: str = "medium", location_context: Dict[str, Any] = None):
+# This function now primarily defines the tool for Gemini
+# The actual search execution is handled by `handle_gemini_web_search`
+
+def get_web_search_tool_declaration():
+    """Returns the function declaration for the web search tool."""
+    return {
+        "name": "search_web",
+        "description": "Searches the web for current information on a specific topic when internal knowledge is insufficient or outdated. Use only for recent events, specific factual data (like current salaries), or verifying contested information.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "search_query": {
+                    "type": "string",
+                    "description": "The specific, optimized query to search for on the web."
+                },
+                "include_location": {
+                    "type": "boolean",
+                    "description": "Set to true if the user's location is relevant to the search (e.g., local job market)."
+                }
+            },
+            "required": ["search_query"]
+        }
+    }
+
+def get_knowledge_base_tool_declaration():
+    """Returns the function declaration for the knowledge base tool."""
+    return {
+        "name": "query_knowledge_base",
+        "description": "Searches an internal knowledge base of coaching books and principles for established concepts, strategies, and general career advice. Prioritize this over web search for foundational knowledge.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The specific question or topic to search for in the knowledge base."
+                }
+            },
+            "required": ["query"]
+        }
+    }
+
+# Removed the main logic from perform_web_search as it's now split:
+# 1. Declaration: get_web_search_tool_declaration()
+# 2. Execution: handle_gemini_web_search() (triggered by LLM)
+# 3. Underlying API call: perform_actual_search()
+# --- New Tool ---
+# 4. Declaration: get_knowledge_base_tool_declaration()
+# 5. Execution: handle_knowledge_base_query() (triggered by LLM)
+# 6. Underlying API call: query_pinecone_knowledge_base()
+
+async def perform_actual_search(search_query):
     """
-    Perform a web search using OpenAI's web search capability.
+    Perform the actual web search using SerpAPI.
     
     Args:
-        query (str): The search query
-        search_context_size (str): Size of the search context ('low', 'medium', 'high')
-        location_context (Dict): Optional location data to refine search
+        search_query (str): The search query to use
         
     Returns:
-        str: The search results text
+        str: Formatted search results text or error message
     """
-    global openai_client
-    
-    if not openai_client:
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            logger.error("OPENAI_API_KEY not set in environment variables")
-            return "Unable to perform web search due to missing API key."
-        openai_client = OpenAI(api_key=api_key)
-    
+    # Use SerpAPI for real web search results
+    serpapi_key = os.environ.get("SERPAPI_KEY")
+    if not serpapi_key:
+        logger.error("SERPAPI_KEY not set in environment variables")
+        return f"Unable to perform web search due to missing SERPAPI_KEY."
+        
     try:
-        logger.info(f"Performing web search for: {query}")
-        
-        # Create a more focused query to get better search results
-        # Analyze the query to determine if it's specifically about jobs, interviews, or career topics
-        job_related_terms = [
-            "job", "career", "interview", "resume", "CV", "hiring", "employment", 
-            "recruit", "salary", "profession", "workplace", "work", "company", 
-            "industry", "position", "role", "skills", "qualification", "experience"
-        ]
-        
-        # Check if query is already job-related
-        is_job_related = any(term in query.lower() for term in job_related_terms)
-        
-        # Formulate the enhanced query
-        if is_job_related:
-            # If already job-related, use as is but add "latest" or "current" to get recent information
-            enhanced_query = f"{query} (latest information 2025)"
-        else:
-            # If not obviously job-related, add career context to make it relevant
-            enhanced_query = f"{query} (in context of professional careers, jobs, and workplace)"
-        
-        # Add location context if available
-        if location_context and location_context.get("location"):
-            loc = location_context["location"]
-            if loc.get("country") and loc.get("city"):
-                # Add specific location to the query for more locally relevant results
-                location_str = f" in {loc.get('city')}, {loc.get('country')}"
-                enhanced_query += location_str
-                logger.info(f"Added location context '{location_str}' to query")
-        
-        logger.info(f"Enhanced search query: {enhanced_query}")
-        
-        # Prepare search tools config
-        search_tools = {
-            "type": "web_search_preview",
-            "search_context_size": "high",
-        }
-        
-        # Add user location to web search if available
-        if location_context and location_context.get("location"):
-            loc = location_context["location"]
-            if loc.get("country") and loc.get("city") and loc.get("region"):
-                search_tools["user_location"] = {
-                    "type": "approximate",
-                    "country": loc.get("country", ""),
-                    "city": loc.get("city", ""),
-                    "region": loc.get("region", "")
-                }
-                logger.info("Added user location data to web search request")
-        
-        # Use high search context size for more comprehensive results
-        response = openai_client.responses.create(
-            model="gpt-4o",
-            tools=[search_tools],
-            input=enhanced_query,
+        logger.info(f"Querying SerpAPI with: {search_query}")
+        response = requests.get(
+            "https://serpapi.com/search",
+            params={
+                "q": search_query,
+                "api_key": serpapi_key,
+                "engine": "google"
+            }
         )
         
-        logger.info("Web search completed successfully")
-        return response.output_text
+        if response.status_code != 200:
+            logger.error(f"SerpAPI request failed with status code: {response.status_code}")
+            return f"Web search failed with status code: {response.status_code}"
+            
+        search_data = response.json()
+        
+        # Extract and format results
+        results_text = ""
+        
+        # Add knowledge graph if available
+        if "knowledge_graph" in search_data:
+            kg = search_data["knowledge_graph"]
+            results_text += f"Knowledge Graph: {kg.get('title', '')}\n"
+            if "description" in kg:
+                results_text += f"Description: {kg['description']}\n"
+            # Add other relevant KG fields concisely
+            kg_details = []
+            for key, value in kg.items():
+                 if key not in ["title", "description", "header_images", "url", "source"] and isinstance(value, (str, int, float)):
+                     kg_details.append(f"{key.replace('_', ' ').title()}: {value}")
+            if kg_details:
+                 results_text += "; ".join(kg_details) + "\n"
+            results_text += "\n"
+        
+        # Add answer box if available
+        if "answer_box" in search_data:
+            box = search_data["answer_box"]
+            results_text += f"Featured Snippet:\n"
+            if "title" in box:
+                results_text += f"Title: {box['title']}\n"
+            if "answer" in box:
+                results_text += f"Answer: {box['answer']}\n"
+            elif "snippet" in box:
+                results_text += f"Snippet: {box['snippet']}\n"
+            results_text += "\n"
+            
+        # Add organic results (limit to top 3 for conciseness)
+        if "organic_results" in search_data:
+            results_text += "Top Search Results:\n"
+            for i, result in enumerate(search_data["organic_results"][:3], 1):
+                results_text += f"{i}. {result.get('title', 'No Title')}\n"
+                if "snippet" in result:
+                    # Keep snippets brief
+                    snippet = result['snippet']
+                    results_text += f"   Snippet: {snippet[:150]}{'...' if len(snippet) > 150 else ''}\n"
+                if "link" in result:
+                    results_text += f"   URL: {result['link']}\n"
+                results_text += "\n"
+                
+        if not results_text:
+             logger.warning("SerpAPI returned no usable results.")
+             return "Web search did not return any relevant results."
+             
+        logger.info(f"SerpAPI search successful, formatted results generated.")
+        return results_text.strip()
+            
     except Exception as e:
-        logger.error(f"Web search failed: {str(e)}")
-        logger.error(f"Error type: {type(e)}")
-        logger.error(f"Full error details: {repr(e)}")
-        return f"Sorry, I encountered an issue while searching the web: {str(e)}"
+        logger.error(f"SerpAPI search failed: {str(e)}")
+        return f"Web search failed during execution: {str(e)}"
 
 def verify_supabase_table():
     """Verify that the conversation_histories table exists and has the correct structure"""
@@ -201,7 +269,7 @@ async def init_supabase():
         
         # Test query to ensure we can access the table
         test_result = supabase.table("conversation_histories").select("*").limit(1).execute()
-        logger.info("Successfully tested query on conversation_sessions table")
+        logger.info("Successfully tested query on conversation_histories table")
             
         return True
     except Exception as e:
@@ -211,56 +279,200 @@ async def init_supabase():
 
 async def store_conversation_message(
     session_id: str,
-    role: str,
-    content: str,
     participant_id: str,
-    metadata: Dict[str, Any] = None,
-    location_data: Dict[str, Any] = None,
-    local_time_data: Dict[str, Any] = None
+    message_data: Dict[str, Any] # Pass the full message dictionary
 ):
-    """Store a single conversation message in Supabase"""
+    """Store a single conversation message in Supabase, mapping to the correct columns."""
     if not supabase:
         logger.error("Cannot store message: Supabase client is not initialized")
         return
         
     try:
+        # Extract relevant parts
+        role = message_data.get("role", "unknown")
+        content = message_data.get("content", "")
+        timestamp = message_data.get("timestamp", get_utc_now().isoformat())
+        
+        # Validate required fields
+        if not session_id:
+            logger.error("Cannot store message: session_id is missing")
+            return None
+            
+        if not content:
+            logger.warning("Storing message with empty content")
+        
+        # Generate a unique message ID if not present
+        if "message_id" not in message_data:
+            message_data["message_id"] = str(uuid.uuid4())
+        
+        message_id = message_data["message_id"]
+        
+        # Prepare data for insertion according to the table schema
         data = {
             "session_id": session_id,
-            "role": role,
-            "content": content,
+            "message_id": message_id,  # Add unique message ID to avoid PK conflicts
             "participant_id": participant_id,
-            "metadata": json.dumps(metadata) if metadata else None,
-            "timestamp": get_utc_now().isoformat(),
-            "user_location": json.dumps(location_data) if location_data else None,
-            "user_local_time": json.dumps(local_time_data) if local_time_data else None
+            "conversation": message_data, # Store full message dict directly - Supabase will handle JSON conversion
+            "raw_conversation": content, # Store raw text content in text column
+            "timestamp": timestamp # Assuming this is the intended text timestamp column
         }
         
-        logger.info(f"Attempting to store message in conversation_sessions:")
-        logger.info(f"Session ID: {session_id}")
-        logger.info(f"Role: {role}")
-        logger.info(f"Participant ID: {participant_id}")
-        logger.info(f"Content length: {len(content)}")
-        logger.info(f"Metadata: {metadata}")
-        if location_data:
-            location_str = ", ".join(f"{k}: {v}" for k, v in location_data.items() if v)
-            logger.info(f"Including location data: {location_str}")
+        logger.info(f"Attempting to store message in conversation_histories:")
+        logger.info(f"  Session ID: {session_id}")
+        logger.info(f"  Message ID: {message_id}")
+        logger.info(f"  Role: {role}")
         
-        result = supabase.table("conversation_histories").insert(data).execute()
-        
-        if result.data:
-            logger.info(f"Successfully stored message. Response data: {json.dumps(result.data, indent=2)}")
-            return result
-        else:
-            logger.warning("Message stored but no data returned from Supabase")
-            logger.warning(f"Full result object: {result}")
+        # Following Supabase documentation pattern - use UPSERT instead of INSERT
+        # This handles the case where the primary key might be a composite of session_id + message_id
+        try:
+            result = (
+                supabase.table("conversation_histories")
+                .upsert(data, on_conflict="message_id")  # Use message_id as conflict resolution
+                .execute()
+            )
+            
+            if result.data:
+                logger.info(f"Successfully stored message. Data ID: {result.data[0].get('id', message_id)}")
+                return result
+            else:
+                logger.warning("Message storage response contained no data")
+                logger.warning(f"Response status: {getattr(result, 'status_code', 'unknown')}")
+                return None
+        except Exception as supabase_error:
+            error_str = str(supabase_error).lower()
+            
+            # Special handling for PK violation on session_id
+            if "duplicate key" in error_str and "conversation_histories_pkey" in error_str:
+                logger.warning("Primary key violation on session_id. Table likely has session_id as primary key.")
+                logger.warning("Attempting alternative storage approach...")
+                
+                try:
+                    # Try to create a new record with a generated ID field
+                    # This approach assumes the table may have an 'id' primary key instead of session_id
+                    if "id" not in data:
+                        data["id"] = str(uuid.uuid4())
+                    
+                    result = (
+                        supabase.table("conversation_histories")
+                        .upsert(data)
+                        .execute()
+                    )
+                    
+                    if result.data:
+                        logger.info(f"Alternative storage successful using ID: {data['id']}")
+                        return result
+                except Exception as alt_error:
+                    logger.error(f"Alternative storage also failed: {str(alt_error)}")
+            
+            # Regular error handling for other issues
+            logger.error(f"Supabase storage error: {str(supabase_error)}")
+            
+            # Check for common Supabase errors
+            if "duplicate" in error_str or "unique constraint" in error_str:
+                logger.warning("Possible duplicate message detected")
+            elif "too large" in error_str or "payload size" in error_str:
+                logger.warning("Message may be too large for Supabase")
+            elif "foreign key constraint" in error_str:
+                logger.warning("Foreign key constraint violation - session_id may not exist")
+            elif "permission denied" in error_str or "not authorized" in error_str:
+                logger.error("Permission denied - check Supabase RLS policies")
+            
+            # For this specific case (PK violation), return None instead of raising
+            # to allow the conversation to continue
             return None
             
     except Exception as e:
         logger.error(f"Failed to store message in Supabase: {str(e)}")
         logger.error(f"Error type: {type(e)}")
         logger.error(f"Error details: {repr(e)}")
-        logger.error(f"Data being stored: {json.dumps(data, indent=2)}")
         return None
+
+async def store_full_conversation():
+    """
+    Store the entire conversation history to Supabase.
+    This function is called at key points to ensure the conversation is saved.
+    """
+    global conversation_history, session_id
+    
+    if not supabase:
+        logger.error("Cannot store full conversation: Supabase client is not initialized")
+        return
+    
+    if not session_id:
+        logger.error("Cannot store full conversation: session_id is not set")
+        return
+        
+    if not conversation_history:
+        logger.info("No conversation history to store")
+        return
+    
+    try:
+        logger.info(f"Storing full conversation with {len(conversation_history)} messages")
+        
+        # Count how many messages need to be stored
+        to_store_count = sum(1 for msg in conversation_history if not msg.get("metadata", {}).get("stored", False))
+        logger.info(f"Messages needing storage: {to_store_count}")
+        
+        if to_store_count == 0:
+            logger.info("All messages already stored")
+            return
+            
+        store_count = 0
+        # Store each message in the conversation history that hasn't been stored yet
+        for message in conversation_history:
+            if message.get("metadata", {}).get("stored", False): # Check the stored flag within metadata
+                continue  # Skip messages that have already been stored
+            
+            # Try to store with up to 3 retries for important messages
+            max_retries = 3 if message.get("role") in ("system", "assistant") else 1
+            
+            for attempt in range(max_retries):
+                try:
+                    # Store the message
+                    result = await store_conversation_message(
+                        session_id=session_id,
+                        participant_id=message.get("participant_id", message["role"]),
+                        message_data=message
+                    )
+                    
+                    if result:
+                        # Mark as stored to avoid duplicates
+                        if "metadata" not in message:
+                            message["metadata"] = {}
+                        message["metadata"]["stored"] = True
+                        store_count += 1
+                        break  # Successful storage, exit retry loop
+                    
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Retrying message storage (attempt {attempt+1}/{max_retries})")
+                        await asyncio.sleep(0.5)  # Short delay between retries
+                except Exception as e:
+                    logger.error(f"Error during storage attempt {attempt+1}: {str(e)}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.5)  # Short delay between retries
+            
+        # Verify success rate    
+        logger.info(f"Successfully stored {store_count}/{to_store_count} messages")
+        
+        # Final verification - important for debugging
+        total_stored = sum(1 for msg in conversation_history if msg.get("metadata", {}).get("stored", False))
+        logger.info(f"Total messages marked as stored: {total_stored}/{len(conversation_history)}")
+        
+    except Exception as e:
+        logger.error(f"Failed to store full conversation: {str(e)}")
+        logger.error(f"Error type: {type(e)}")
+        logger.error(f"Full error details: {repr(e)}")
+
+# Add a helper method to directly await the storage task when critical
+async def ensure_storage_completed():
+    """Ensure that conversation storage is completed before proceeding."""
+    try:
+        await store_full_conversation()
+        logger.info("Storage operation completed")
+        return True
+    except Exception as e:
+        logger.error(f"Error during ensured storage: {str(e)}")
+        return False
 
 def load_env_files():
     # Get the paths to both .env files
@@ -288,6 +500,9 @@ def load_env_files():
     logger.info("LIVEKIT_API_KEY: %s", os.environ.get('LIVEKIT_API_KEY', 'NOT SET'))
     logger.info("OPENAI_API_KEY exists: %s", os.environ.get('OPENAI_API_KEY') is not None)
     logger.info("ELEVENLABS_API_KEY exists: %s", os.environ.get('ELEVENLABS_API_KEY') is not None)
+    logger.info("GEMINI_API_KEY exists: %s", os.environ.get('GEMINI_API_KEY') is not None)
+    logger.info("GOOGLE_API_KEY exists: %s", os.environ.get('GOOGLE_API_KEY') is not None)
+    logger.info("GOOGLE_APPLICATION_CREDENTIALS exists: %s", os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') is not None)
     
     if os.environ.get('OPENAI_API_KEY'):
         api_key = os.environ.get('OPENAI_API_KEY', '')
@@ -296,6 +511,19 @@ def load_env_files():
     if os.environ.get('ELEVENLABS_API_KEY'):
         api_key = os.environ.get('ELEVENLABS_API_KEY', '')
         logger.info("ELEVENLABS_API_KEY starts with: %s", api_key[:15] if api_key else 'EMPTY')
+        
+    if os.environ.get('GEMINI_API_KEY'):
+        api_key = os.environ.get('GEMINI_API_KEY', '')
+        logger.info("GEMINI_API_KEY starts with: %s", api_key[:15] if api_key else 'EMPTY')
+        
+        # Initialize Gemini API if key is available
+        try:
+            genai.configure(api_key=api_key)
+            global gemini_initialized
+            gemini_initialized = True
+            logger.info("Gemini API initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Gemini API: {str(e)}")
 
     # Try reading both .env files directly
     try:
@@ -631,7 +859,7 @@ def extract_client_ip(participant: rtc.Participant) -> str:
             except json.JSONDecodeError as e:
                 logger.error(f"Error parsing participant metadata for IP: {str(e)}")
         
-        # Try to get IP from connection info if LiveKit provides it
+        # Try to get IP from connection info if LiveKit makes it available
         # This is implementation-specific and depends on what LiveKit makes available
         if hasattr(participant, "connection_info") and hasattr(participant.connection_info, "client_ip"):
             logger.info(f"Found IP in connection_info: {participant.connection_info.client_ip}")
@@ -773,6 +1001,8 @@ async def entrypoint(ctx: JobContext):
 
 async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
     try:
+        global conversation_history, session_id, timeout_task, periodic_saver_task
+        
         logger.info(f"Participant metadata raw: '{participant.metadata}'")
         logger.info(f"Participant identity: {participant.identity}")
         logger.info(f"Participant name: {participant.name}")
@@ -780,6 +1010,27 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
         # Immediately create session ID
         session_id = ctx.room.name
         logger.info(f"Starting new session with ID: {session_id}")
+        
+        # Start a periodic task to ensure conversations are saved
+        async def periodic_conversation_saver():
+            try:
+                while True:
+                    await asyncio.sleep(30)  # Check every 30 seconds
+                    if conversation_history:
+                        unsaved_count = sum(1 for msg in conversation_history if not msg.get("metadata", {}).get("stored", False))
+                        if unsaved_count > 0:
+                            logger.info(f"Periodic save: Found {unsaved_count} unsaved messages")
+                            await store_full_conversation()
+                        else:
+                            logger.debug("Periodic save: All messages already saved")
+            except asyncio.CancelledError:
+                logger.info("Periodic conversation saver task cancelled")
+            except Exception as e:
+                logger.error(f"Error in periodic conversation saver: {e}")
+                
+        # Start the periodic saver task
+        periodic_saver_task = asyncio.create_task(periodic_conversation_saver())
+        logger.info("Started periodic conversation saver task")
         
         # Parse metadata safely
         try:
@@ -887,33 +1138,11 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
         # Immediately store the initial context to database to ensure we capture location data
         # Even if the session ends prematurely
         try:
-            # Store location in a standalone message with detailed context
-            detailed_content = "Session started with the following user context:\n"
-            
-            if user_context["location"]:
-                loc = user_context["location"]
-                detailed_content += f"- Location: {loc.get('city', 'Unknown')}, {loc.get('region', '')}, {loc.get('country', '')}\n"
-                detailed_content += f"- Geolocation source: {loc.get('source', 'Unknown')}\n"
-            else:
-                detailed_content += "- Location: Could not determine user location\n"
-                
-            if user_context["local_time"]:
-                time_data = user_context["local_time"]
-                detailed_content += f"- Local time: {time_data.get('local_time', 'Unknown')}\n"
-                detailed_content += f"- Timezone: {time_data.get('timezone', 'Unknown')}\n"
-                detailed_content += f"- Time of day: {time_data.get('time_of_day', 'Unknown')}\n"
-            else:
-                detailed_content += "- Local time: Could not determine user local time\n"
-            
             # Store context message in database immediately
             await store_conversation_message(
                 session_id=session_id,
-                role="system",
-                content=detailed_content,
                 participant_id="system",
-                metadata={"type": "location_context", "session_start": True},
-                location_data=user_context.get("location", {}),
-                local_time_data=user_context.get("local_time", {})
+                message_data=initial_context_message
             )
             logger.info("Successfully stored user location context in database immediately")
         except Exception as e:
@@ -921,726 +1150,286 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
             logger.error(f"Error type: {type(e)}")
             logger.error(f"Full error details: {repr(e)}")
         
-        # Create initial chat context with default system prompt
-        logger.info(f"Using default system prompt: {DEFAULT_INTERVIEW_PROMPT[:100]}...")  # Log first 100 chars for debugging
+        # Load the base prompt
+        base_prompt = prompt.prompt
         
-        initial_ctx = llm.ChatContext().append(
-            role="system",
-            text=DEFAULT_INTERVIEW_PROMPT
-        )
-        logger.info("Created initial chat context with default system prompt")
-
-        # Add location and time context to the system prompt if available
-        location_context = ""
-        if user_context["location"] or user_context["local_time"]:
-            location_context = "\nUser context information:\n"
+        # Prepare context strings
+        location_context_str = "No specific location context available."
+        if user_context["location"]:
+            loc = user_context["location"]
+            parts = [loc.get('city'), loc.get('region'), loc.get('country')]
+            location_context_str = f"User location: {', '.join(filter(None, parts))}"
             
-            if user_context["location"]:
-                loc = user_context["location"]
-                location_str = f"Location: {loc.get('city', '')}, {loc.get('region', '')}, {loc.get('country', '')}"
-                location_context += location_str.replace(", ,", ",").replace(",,", ",") + "\n"
+        time_context_str = "No specific time context available."
+        if user_context["local_time"]:
+            time_data = user_context["local_time"]
+            parts = [
+                f"Local time: {time_data.get('local_time', 'Unknown')}",
+                f"Timezone: {time_data.get('timezone', 'Unknown')}",
+                f"Time of day: {time_data.get('time_of_day', 'Unknown')}"
+            ]
+            time_context_str = f"User time: {'; '.join(parts)}"
             
-            if user_context["local_time"]:
-                time = user_context["local_time"]
-                location_context += f"Local time: {time.get('local_time', '')}\n"
-                location_context += f"Time of day: {time.get('time_of_day', '')}\n"
-                location_context += f"Day of week: {time.get('day_of_week', '')}\n"
-            
-            location_context += "\nYou may use this context information to personalize your responses when relevant.\n"
-            initial_ctx.append(
-                role="system",
-                text=location_context
-            )
-            logger.info(f"Added user location and time context to system prompt")
+        # Inject context into the prompt
+        system_instructions = base_prompt.replace("{{LOCATION_CONTEXT}}", location_context_str)
+        system_instructions = system_instructions.replace("{{TIME_CONTEXT}}", time_context_str)
+        logger.info("Injected user context into system prompt.")
         
-        # Set session timeout (20 minutes)
-        SESSION_TIMEOUT = 20 * 60  # 20 minutes in seconds
-        session_start_time = asyncio.get_event_loop().time()
-        timeout_task = None
-
-        # Verify all required environment variables
-        required_vars = ["DEEPGRAM_API_KEY", "OPENAI_API_KEY"]
-        for var in required_vars:
-            if not os.environ.get(var):
-                raise Exception(f"Required environment variable {var} is not set")
-            logger.info(f"Found {var} in environment variables")
-
-        
-        deepgram_api_key = os.environ.get("DEEPGRAM_API_KEY")
-        openai_api_key = os.environ.get("OPENAI_API_KEY")
-
-
-        logger.info("API keys validated successfully")
-
-        # Initialize services with detailed error handling
+        # Initialize the Multimodal Agent with RealtimeModel
+        global agent
         try:
-            logger.info("Initializing Deepgram STT...")
-            stt = deepgram.STT(
-                model="nova-2-general",
-                language="en-US",
-                interim_results=True,
-                punctuate=True,
-                smart_format=True,
-                sample_rate=16000,
-                no_delay=True,
-                endpointing_ms=25,
-                filler_words=True,
-                api_key=deepgram_api_key
-            )
-            logger.info("Deepgram STT initialized successfully")
-
-            logger.info("Initializing OpenAI TTS...")
-            try:
-                tts = openai_tts.TTS(
-                    model="tts-1",
-                    voice=OPENAI_VOICE_ID,
-                    api_key=openai_api_key
+            logger.info("Attempting to create MultimodalAgent with RealtimeModel")
+            agent = multimodal.MultimodalAgent(
+                model=google.beta.realtime.RealtimeModel(
+                    instructions=system_instructions,
+                    voice="Puck", # Or another desired voice
+                    temperature=0.7, # Adjust as needed
+                    api_key=os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"),
+                    modalities=["AUDIO"] # Start with audio, can add "TEXT" if needed
                 )
-                logger.info("OpenAI TTS initialized successfully")
-            except Exception as tts_error:
-                logger.error(f"Failed to initialize OpenAI TTS: {str(tts_error)}")
-                raise
-
-            logger.info("Initializing OpenAI LLM...")
-            llm_instance = openai.LLM(
-                model="ft:gpt-4o-mini-2024-07-18:improov::BFDKAqhD",
-                api_key=openai_api_key
             )
-            logger.info("OpenAI LLM initialized successfully with fine-tuned model")
-
-            # Create the voice pipeline agent with the previously created initial_ctx
-            logger.info("Creating VoicePipelineAgent...")
-            agent = VoicePipelineAgent(
-                stt=stt,
-                tts=tts,
-                vad=ctx.proc.userdata.get("vad"),  # Use safe dictionary access
-                llm=llm_instance,
-                min_endpointing_delay=0.5,
-                max_endpointing_delay=5.0,
-                chat_ctx=initial_ctx
-            )
-            logger.info("VoicePipelineAgent created successfully")
-
-            # Add web search capability to the agent
-            async def handle_web_search_requests(user_message: str):
-                """
-                Check if a user message requires web search and performs the search if needed.
-                
-                Args:
-                    user_message (str): The user's message
+            logger.info("Successfully created MultimodalAgent.")
+            
+            # Add initial system prompt to history (if applicable, API might differ)
+            # This might not be necessary if `instructions` handles it
+            # if hasattr(agent, 'llm_engine') and hasattr(agent.llm_engine, 'add_to_history'):
+            #     try:
+            #         agent.llm_engine.add_to_history(role="system", content=system_instructions)
+            #         logger.info("Added system instructions to RealtimeModel history.")
+            #     except Exception as hist_e:
+            #         logger.error(f"Failed to add system instructions to history: {hist_e}")
                     
-                Returns:
-                    bool: True if web search was performed, False otherwise
-                    str: The search results if search was performed, empty string otherwise
-                """
-                # List of trigger phrases that indicate a need for web search
-                web_search_triggers = [
-                    "search for", "find information about", "look up", 
-                    "search the web", "recent information", "latest news",
-                    "current trends", "what's new", "recent developments",
-                    "current statistics", "latest statistics", "current market",
-                    "job market", "hiring trends", "employment statistics",
-                    "search", "recent", "latest", "current", "today", "this year",
-                    "recent interview questions", "latest job trends"
-                ]
-                
-                # Check if message contains trigger phrases
-                if any(trigger in user_message.lower() for trigger in web_search_triggers):
-                    logger.info(f"Web search trigger detected in message: {user_message}")
-                    search_result = await perform_web_search(user_message, location_context=user_context)
-                    return True, search_result
-                
-                return False, ""
-            
-            # Add system prompt information about web search
-            web_search_system_info = """
-            You have access to web search capabilities for EMERGENCY situations only. This is NOT a feature to be used regularly.
-            
-            Only use web search results when provided in these specific situations:
-            
-            1. When a user explicitly challenges the accuracy of your information with phrases like "that's not correct" or "you're wrong about that"
-            2. When asked to verify very specific numeric data from 2023-2025 that you cannot confidently provide
-            3. When explicitly asked for the "latest statistics" on employment, job markets, salaries, or industry trends
-            
-            In ALL other cases, rely on your existing knowledge to answer questions.
-            
-            Web search is an emergency-only feature reserved for preventing critical factual errors.
-            When search results are provided to you, clearly indicate when you're incorporating this verified information.
-            """
-            
-            # Update the initial context with web search capability
-            initial_ctx.append(
-                role="system",
-                text=web_search_system_info
-            )
-            logger.info("Added web search capability to system prompt")
-
-        except Exception as service_error:
-            logger.error(f"Failed to initialize services: {str(service_error)}")
-            logger.error(f"Error type: {type(service_error)}")
-            logger.error(f"Full error details: {repr(service_error)}")
-            raise
-
-        # Function to store the entire conversation
-        async def store_full_conversation():
-            try:
-                # Filter out system messages from the conversation history
-                filtered_conversation = [msg for msg in conversation_history if msg.get("role") != "system"]
-                
-                # Create the conversation object with only the essential fields
-                conversation_data = {
-                    "session_id": session_id,
-                    "participant_id": participant.identity,
-                    "conversation": filtered_conversation,  # Store only non-system messages
-                    "timestamp": get_utc_now().isoformat(),
-                    "user_location": user_context.get("location", {}),  # Store location data
-                    "user_local_time": user_context.get("local_time", {})  # Store time data
-                }
-                
-                logger.info(f"Storing conversation with {len(filtered_conversation)} messages")
-                logger.info(f"Last message in history: {json.dumps(filtered_conversation[-1] if filtered_conversation else None, indent=2)}")
-                
-                # Check if a record already exists for this session
-                check_query = supabase.table("conversation_histories").select("*").eq("session_id", session_id).execute()
-                
-                if check_query.data:
-                    logger.info(f"Updating existing conversation record for session {session_id}")
-                    result = supabase.table("conversation_histories").update(conversation_data).eq("session_id", session_id).execute()
-                else:
-                    logger.info(f"Creating new conversation record for session {session_id}")
-                    result = supabase.table("conversation_histories").insert(conversation_data).execute()
-                
-                if result.data:
-                    logger.info(f"Successfully stored conversation. Response data: {json.dumps(result.data, indent=2)}")
-                    return result
-                else:
-                    logger.warning("Store operation completed but returned no data")
-                    logger.warning(f"Full result object: {result}")
-                    return None
-                    
-            except Exception as e:
-                logger.error(f"Failed to store conversation: {str(e)}")
-                logger.error(f"Error type: {type(e)}")
-                logger.error(f"Error details: {repr(e)}")
-                # Log the conversation history for debugging
-                try:
-                    logger.error(f"Conversation data being stored: {json.dumps(conversation_data, indent=2)}")
-                except Exception as debug_err:
-                    logger.error(f"Error logging conversation data: {str(debug_err)}")
-                return None
+        except Exception as e:
+            logger.error(f"Fatal error creating MultimodalAgent: {e}")
+            logger.error("Cannot proceed without a working agent.")
+            # Depending on requirements, you might want to raise the exception
+            # or attempt a fallback if one existed.
+            raise e # Stop execution if agent creation fails critically
         
+        # --- Function Calling (Conceptual - Needs Verification) ---
+        # The RealtimeModel/MultimodalAgent integration with function calling tools 
+        # needs specific verification based on the livekit-plugins-google API.
+        # The following registration attempt is commented out as it might not work.
+        ''' 
+        # Register function handlers with the agent
         try:
-            if not participant.metadata:
-                logger.info("No metadata provided, using default configuration")
-                default_metadata = {
-                    "instructions": DEFAULT_INTERVIEW_PROMPT,
-                    "modalities": "text_and_audio",
-                    "voice": OPENAI_VOICE_ID,
-                    "temperature": 0.8,
-                    "max_output_tokens": 2048,
-                    "turn_detection": json.dumps({
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "silence_duration_ms": 300,
-                        "prefix_padding_ms": 200,
-                    })
-                }
-                metadata = default_metadata
-            else:
-                metadata = json.loads(participant.metadata)
-            logger.info(f"Using metadata: {metadata}")
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse metadata: {str(e)}")
-            logger.error(f"Metadata type: {type(participant.metadata)}")
-            logger.error(f"Metadata length: {len(participant.metadata) if participant.metadata else 0}")
-            raise
+            # Check if the model or agent exposes a method for tool/function handling
+            tool_handler_registry = None
+            if hasattr(agent, 'register_function_handler'): # Check agent first
+                tool_handler_registry = agent
+            elif hasattr(agent, 'model') and hasattr(agent.model, 'register_function_handler'): # Check model
+                tool_handler_registry = agent.model
 
-        # Add system message to conversation history
-        system_message = {
-            "role": "system",
-            "content": metadata.get("instructions", ""),
-            "timestamp": get_utc_now().isoformat(),
-            "metadata": {"session_start": True, "config": metadata}
-        }
-        conversation_history.append(system_message)
-        
-        # Store initial conversation
-        await store_full_conversation()
-
-        config = parse_session_config(metadata)
-        logger.info(f"Starting with config: {config.to_dict()}")
-
-        # Create initial chat context
-        initial_ctx = llm.ChatContext().append(
-            role="system",
-            text=DEFAULT_INTERVIEW_PROMPT,
-        )
-
-        # Debug hook to print all events
-        original_emit = agent.emit
-        def debug_emit(event, *args, **kwargs):
-            logger.info(f"EMIT: {event} with args: {args} kwargs: {kwargs}")
-            # If this is an assistant message, ensure it's captured
-            if event in ["message", "assistant_response", "agent_speech_committed", "agent_speech_interrupted"]:
-                try:
-                    msg = args[0] if args else None
-                    if msg and hasattr(msg, 'role') and msg.role == "assistant":
-                        msg_content = msg.content
-                        if isinstance(msg_content, list):
-                            msg_content = "\n".join(str(item) for item in msg_content)
-                        
-                        # Add to conversation history
-                        assistant_message = {
-                            "role": "assistant",
-                            "content": msg_content,
-                            "timestamp": get_utc_now().isoformat(),
-                            "metadata": {"type": "response", "event": event}
-                        }
-                        conversation_history.append(assistant_message)
-                        
-                        # Store updated conversation
-                        asyncio.create_task(store_full_conversation())
-                        logger.info(f"Added assistant message to conversation history from {event}, total messages: {len(conversation_history)}")
-                except Exception as e:
-                    logger.error(f"Error in debug_emit handler for {event}: {str(e)}")
-                    logger.error(f"Error type: {type(e)}")
-                    logger.error(f"Full error details: {repr(e)}")
-            
-            return original_emit(event, *args, **kwargs)
-        agent.emit = debug_emit
-
-        # Add preparatory method to pre-generate TTS audio and reduce latency
-        # This wraps the original agent to add a prepare_say method
-        original_say = agent.say
-        _tts_cache = {}  # Cache for prepared TTS audio
-        
-        async def prepare_say(text: str):
-            """Pre-generate TTS audio to reduce latency when actually speaking"""
-            try:
-                # Skip if already in cache
-                if text in _tts_cache:
-                    logger.info(f"Using cached TTS audio for: {text[:50]}...")
-                    return
+            if tool_handler_registry:
+                # Register web search handler
+                tool_handler_registry.register_function_handler("search_web", handle_gemini_web_search)
+                logger.info("Registered function handler for 'search_web' (Conceptual)")
                 
-                logger.info(f"Pre-generating TTS audio for: {text[:50]}...")
-                # Use the TTS service directly to generate audio
-                audio_data = await agent.tts.synthesize(text)
+                # Register knowledge base handler
+                tool_handler_registry.register_function_handler("query_knowledge_base", handle_knowledge_base_query)
+                logger.info("Registered function handler for 'query_knowledge_base' (Conceptual)")
                 
-                # Store in cache
-                _tts_cache[text] = audio_data
-                logger.info(f"TTS audio prepared and cached ({len(audio_data)} bytes)")
-                return audio_data
-            except Exception as e:
-                logger.error(f"Error preparing TTS audio: {str(e)}")
-                logger.error(f"Error type: {type(e)}")
-                logger.error(f"Full error details: {repr(e)}")
-                # Don't raise, just log - we'll fall back to regular synthesis
-        
-        async def optimized_say(text: str, allow_interruptions=True):
-            """Enhanced say method that uses cached audio when available"""
-            try:
-                # Try to use cached audio if available
-                if text in _tts_cache:
-                    logger.info(f"Using cached audio for speech")
-                    # Use the pre-generated audio directly if available
-                    # This requires implementation details of the agent's say method
-                    # If direct use isn't possible, we just let the original method run
-                    # which will be faster on second attempt due to internal caching
-                
-                # Fall back to original say method (which will be faster if we've pre-cached)
-                return await original_say(text, allow_interruptions=allow_interruptions)
-            except Exception as e:
-                logger.error(f"Error in optimized say: {str(e)}")
-                # Fall back to original say method
-                return await original_say(text, allow_interruptions=allow_interruptions)
-        
-        # Attach the new methods to the agent
-        agent.prepare_say = prepare_say
-        agent.say = optimized_say
-
-        # Set up metrics collection
-        usage_collector = metrics.UsageCollector()
-
-        @agent.on("metrics_collected")
-        def on_metrics_collected(agent_metrics: metrics.AgentMetrics):
-            metrics.log_metrics(agent_metrics)
-            usage_collector.collect(agent_metrics)
-
-        # Create a task to check session timeout and conversation end detection
-        last_message_time = asyncio.get_event_loop().time()  # Define this at the outer scope
-        
-        async def check_session_timeout():
-            try:
-                nonlocal last_message_time  # Now this reference is valid
-                inactive_count = 0
-                
-                while True:
-                    current_time = asyncio.get_event_loop().time()
-                    elapsed_time = current_time - session_start_time
-                    time_since_last_message = current_time - last_message_time
-                    
-                    # Check if session timeout reached
-                    if elapsed_time >= SESSION_TIMEOUT:
-                        logger.info("Session timeout reached (20 minutes). Ending session...")
-                        goodbye_message = "I apologize, but our session time (20 minutes) has come to an end. Thank you for the great conversation! Feel free to start a new session if you'd like to continue practicing."
-                        
-                        # Use say_and_store to ensure the message is in the conversation history
-                        await say_and_store(goodbye_message)
-                        
-                        # Wait for the goodbye message to be sent
-                        await asyncio.sleep(5)
-                        # Close the room connection
-                        await ctx.room.disconnect()
-                        return
-                    
-                    # Detect conversation inactivity (user hasn't spoken in a while)
-                    if time_since_last_message > 120:  # 2 minutes of inactivity
-                        inactive_count += 1
-                        if inactive_count >= 2:  # Check multiple times to confirm inactivity
-                            logger.info("Conversation appears to be complete (no activity for 4+ minutes)")
-                            goodbye_message = "It seems our conversation has come to a natural end. Thank you for chatting with me today! If you need more assistance in the future, feel free to start a new session. Goodbye!"
-                            
-                            await say_and_store(goodbye_message)
-                            await asyncio.sleep(5)
-                            await ctx.room.disconnect()
-                            logger.info("Agent disconnected after detected conversation end")
-                            return
-                        
-                        # First time detecting inactivity, ask if user wants to continue
-                        if inactive_count == 1:
-                            logger.info("Detected inactivity, checking if conversation is over")
-                            prompt_message = "I notice we haven't spoken for a couple of minutes. Is there anything else I can help you with today? If not, we can end our session."
-                            await say_and_store(prompt_message)
-                            # Reset the timer to give the user a chance to respond
-                            last_message_time = current_time
-                    else:
-                        # Reset counter if there's activity
-                        inactive_count = 0
-                    
-                    # Periodically store conversation history
-                    if elapsed_time % 60 < 10:  # Store every minute
-                        await store_full_conversation()
-                    
-                    await asyncio.sleep(10)  # Check every 10 seconds
-            except Exception as e:
-                logger.error(f"Error in timeout checker: {str(e)}")
-                raise
-            finally:
-                logger.info("Timeout checker task ended")
-
-        # Start the timeout checker task
-        timeout_task = asyncio.create_task(check_session_timeout())
-        
-        # Update last_message_time when user speaks
-        @agent.on("user_speech_committed")
-        def on_user_speech_committed(msg: llm.ChatMessage):
-            try:
-                nonlocal last_message_time
-                last_message_time = asyncio.get_event_loop().time()
-                
-                logger.info(f"User speech committed: {msg.content}")
-                # Convert message content list (if any, e.g., images) to a string
-                if isinstance(msg.content, list):
-                    msg_content = "\n".join("[image]" if isinstance(x, ChatImage) else x for x in msg.content)
+                # Provide tool declarations (Conceptual)
+                if hasattr(tool_handler_registry, 'set_tools'):
+                    tools = [
+                        get_web_search_tool_declaration(),
+                        get_knowledge_base_tool_declaration()
+                    ]
+                    tool_handler_registry.set_tools(tools)
+                    logger.info("Provided tool declarations to agent/model (Conceptual).")
                 else:
-                    msg_content = msg.content
+                    logger.warning("Could not set tools - API method unknown or differs.")
+                     
+            else:
+                 logger.warning("Could not find a method to register function handlers on agent or model.")
+        except Exception as e:
+            logger.error(f"Error attempting to register function handlers or set tools: {e}")
+        '''
+        logger.warning("Function handler registration for MultimodalAgent/RealtimeModel is currently disabled pending API verification.")
+        # --- End Function Calling Section ---
+        
+        # Function to handle the actual web search when called by Gemini
+        async def handle_gemini_web_search(search_query: str, include_location: bool = False):
+            """Handles the web search request triggered by Gemini function call."""
+            logger.info(f"Gemini requested web search for: {search_query}")
+            
+            query_to_search = search_query
+            if include_location and user_context.get("location"):
+                loc = user_context["location"]
+                if loc.get("city") and loc.get("country"):
+                    location_str = f" in {loc.get('city')}, {loc.get('country')}"
+                    query_to_search += location_str
+                    logger.info(f"Added location context: {location_str}")
+
+            # Perform the actual search
+            search_results = await perform_actual_search(query_to_search)
+
+            # Provide results back to Gemini
+            # For RealtimeModel, the way to return function results might differ.
+            # It might involve sending a specific message type or using a callback.
+            # This example assumes we log it and potentially add to history if possible.
+            if search_results and not search_results.startswith("Unable") and not search_results.startswith("Web search failed"):
+                logger.info("Web search successful. Results logged. Returning result string conceptually.")
+                # Conceptual return - Actual mechanism TBD based on plugin API
+                # Example: Maybe return a dictionary? {'tool_name': 'search_web', 'result': f"Web search results...{search_results}"}
+                # Example: Or add to history if that's the mechanism
+                try:
+                    # Attempt to add to history as a system message
+                    if hasattr(agent, 'add_to_history'): # Check if agent has this method
+                         await agent.add_to_history(role="system", content=f"Web search results for '{search_query}':\n{search_results}")
+                         await store_full_conversation()
+                         logger.info("Attempted to add web search results to MultimodalAgent history.")
+                    else:
+                         logger.warning("MultimodalAgent may not support add_to_history directly. Results not added.")
+                except Exception as e:
+                    logger.error(f"Failed to add search results to history: {e}")
+                # This return should be outside the try/except, but inside the if block
+                return f"Web search results for '{search_query}':\n{search_results}" # Placeholder return 
+            else:
+                logger.error(f"Web search failed or returned no results.")
+                return "Web search failed." # Placeholder return
+
+        # Function to handle the knowledge base query when called by Gemini
+        async def handle_knowledge_base_query(query: str):
+            """Handles the knowledge base query triggered by Gemini function call."""
+            logger.info(f"Gemini requested knowledge base query for: {query}")
+            
+            # Query Pinecone
+            kb_results = await query_pinecone_knowledge_base(query)
+            
+            # Provide results back to Gemini (Conceptual return similar to web search)
+            if kb_results and not kb_results.startswith("Internal knowledge base is currently unavailable") \
+               and not kb_results.startswith("Could not process query") \
+               and not kb_results.startswith("No specific information found") \
+               and not kb_results.startswith("An error occurred"):
+                logger.info("Knowledge base query successful. Results logged. Returning result string conceptually.")
+                # Conceptual return
+                try:
+                     if hasattr(agent, 'add_to_history'):
+                         await agent.add_to_history(role="system", content=kb_results)
+                         await store_full_conversation()
+                         logger.info("Attempted to add knowledge base results to MultimodalAgent history.")
+                     else:
+                         logger.warning("MultimodalAgent may not support add_to_history directly. KB Results not added.")
+                except Exception as e:
+                    logger.error(f"Failed to add knowledge base results to history: {e}")
+                # This return should be outside the try/except, but inside the if block
+                return kb_results # Placeholder return
+            else:
+                logger.info(f"Knowledge base query failed or returned no results: {kb_results}")
+                # Optionally inform LLM that nothing was found
+                try:
+                     if hasattr(agent, 'add_to_history'):
+                         await agent.add_to_history(role="system", content="The knowledge base query did not return relevant information.")
+                     else:
+                         logger.warning("MultimodalAgent may not support add_to_history directly. KB empty result not added.")
+                except Exception as e:
+                     logger.error(f"Failed to add KB empty result message to history: {e}")
+                # This return should be outside the try/except, but inside the else block
+                return "Knowledge base query did not return relevant information." # Placeholder return
+
+        # Update last_message_time when user speaks
+        # Event provides transcript string directly for MultimodalAgent
+        def on_user_speech_committed(transcript: str): 
+            try:
+                global user_message  # Use global variable
                 
-                # Check if web search is needed for this message
-                asyncio.create_task(process_user_message_with_search(msg_content))
+                # Track message time
+                message_time = asyncio.get_event_loop().time()
+                logger.info(f"User speech committed at time: {message_time}")
                 
-                # Add to conversation history with location context
-                user_message = {
+                logger.info(f"User speech committed (transcript): {transcript}")
+                msg_content = transcript # Use the transcript string directly
+                
+                # Update the user_message variable (potentially for other uses)
+                user_message = msg_content
+                
+                # Store user message
+                user_chat_message = {
                     "role": "user",
                     "content": msg_content,
                     "timestamp": get_utc_now().isoformat(),
-                    "metadata": {
-                        "type": "transcription", 
-                        "is_final": True,
+                    "metadata": { 
+                        "type": "user_speech", 
+                        "stored": False, # Mark for storage
                         "user_location": user_context.get("location", {}),
                         "user_local_time": user_context.get("local_time", {})
                     }
                 }
-                conversation_history.append(user_message)
+                conversation_history.append(user_chat_message)
                 
-                # Check for explicit end phrases
-                end_phrases = ["goodbye", "bye", "end conversation", "end session", "that's all", 
-                              "thank you that's all", "we're done", "that will be all"]
-                
-                if any(phrase in msg_content.lower() for phrase in end_phrases):
-                    logger.info("User indicated end of conversation")
-                    asyncio.create_task(end_conversation())
-                
-                # Store updated conversation
+                # Create a dedicated task to ensure storage completes, but don't wait for it
+                # This allows the handler to return quickly while ensuring storage happens
                 asyncio.create_task(store_full_conversation())
-                logger.info(f"Added user message to conversation history, total messages: {len(conversation_history)}")
+                logger.info(f"Created storage task for user message: {msg_content[:30]}...")
+                
             except Exception as e:
-                logger.error(f"Error in user speech callback: {str(e)}")
-                
-        # Function to end the conversation gracefully
-        async def end_conversation():
-            try:
-                logger.info("Ending conversation gracefully")
-                goodbye_message = "Thank you for chatting with me today! I hope I was able to help with your professional needs. Have a great day!"
-                
-                # Say goodbye and store the message
-                await say_and_store(goodbye_message)
-                
-                # Wait for the message to be delivered
-                await asyncio.sleep(5)
-                
-                # Disconnect from the room
-                await ctx.room.disconnect()
-                logger.info("Agent disconnected after conversation end")
-            except Exception as e:
-                logger.error(f"Error ending conversation: {str(e)}")
-
-        # Process user message with web search capability
-        async def process_user_message_with_search(msg_content: str):
-            try:
-                # SEVERELY constrained web search - only in true emergencies or clear hallucination risks
-                # Core emergency triggers - much more limited than before
-                strict_emergency_triggers = [
-                    "2025 data", 
-                    "latest statistics", "current statistics", 
-                    "fact check this", "verify this fact",
-                    "that's incorrect information", "that's not right",
-                    "citation needed", "source needed"
-                ]
-                
-                # Initial check for strict emergency triggers - explicit requests for verification
-                needs_search = any(trigger in msg_content.lower() for trigger in strict_emergency_triggers)
-                
-                # If no emergency trigger found, check for explicit challenges to the agent's knowledge
-                if not needs_search:
-                    challenge_patterns = [
-                        "you're wrong about", "that's not correct", "that information is outdated",
-                        "that data is old", "that's false", "you're mistaken about",
-                        "you need to update your information on", "you've made an error about"
-                    ]
-                    needs_search = any(pattern in msg_content.lower() for pattern in challenge_patterns)
-                
-                # Final check - only for VERY specific factual questions that require current data
-                # Must contain year reference AND specific request for statistics/numbers
-                if not needs_search:
-                    has_year_reference = any(year in msg_content.lower() for year in ["2024", "2025"])
-                    has_data_request = any(term in msg_content.lower() for term in ["statistics", "percentage", "data", "numbers", "rate", "survey"])
-                    
-                    needs_search = has_year_reference and has_data_request
-                
-                # Log the decision with detailed reasoning
-                if needs_search:
-                    logger.info(f"EMERGENCY web search triggered: {msg_content}")
-                    logger.info("Reason: Detected critical challenge to agent knowledge or specific request for current data")
-                    
-                    # Add an extra check - only search for questions we're likely to hallucinate on
-                    hallucination_prone_topics = [
-                        "employment rate", "job market", "industry growth", "salary survey",
-                        "career statistics", "hiring trends", "workforce data", "economic indicators", 
-                        "technology adoption", "industry standards", "market share", "professional certification"
-                    ]
-                    
-                    is_hallucination_prone = any(topic in msg_content.lower() for topic in hallucination_prone_topics)
-                    
-                    if not is_hallucination_prone:
-                        logger.info("Canceling web search - topic not in hallucination-prone category")
-                        return
-                    
-                    # Proceed with web search only in true emergency situations
-                    search_result = await perform_web_search(msg_content, location_context=user_context)
-                    
-                    if search_result and not search_result.startswith("Sorry, I encountered an issue"):
-                        logger.info(f"Emergency web search results obtained for hallucination prevention")
-                        
-                        # Add search results to conversation as a system message
-                        system_search_message = {
-                            "role": "system",
-                            "content": f"EMERGENCY web search results for '{msg_content}':\n\n{search_result}",
-                            "timestamp": get_utc_now().isoformat(),
-                            "metadata": {"type": "web_search", "query": msg_content, "reason": "critical_hallucination_prevention"}
-                        }
-                        conversation_history.append(system_search_message)
-                        
-                        # Update agent's context with search results - emphasize emergency-only usage
-                        agent.chat_ctx.append(
-                            role="system",
-                            text=f"EMERGENCY FACTUAL VERIFICATION: {search_result}\n\nOnly use these search results if absolutely necessary to correct critical factual errors. Otherwise, rely on your existing knowledge."
-                        )
-                        
-                        # Store updated conversation
-                        await store_full_conversation()
-                        logger.info(f"Added emergency web search results to conversation history")
-                    else:
-                        logger.info(f"No relevant emergency web search results found or error occurred")
-                else:
-                    logger.info(f"No emergency web search needed - using existing model knowledge")
-            except Exception as e:
-                logger.error(f"Error processing message with web search: {str(e)}")
-                logger.error(f"Error type: {type(e)}")
+                logger.error(f"Error in on_user_speech_committed: {str(e)}")
                 logger.error(f"Full error details: {repr(e)}")
 
-        # Helper function to store assistant message
-        async def store_assistant_message(msg_content: str, event_type: str):
-            try:
-                # Check if this exact message is already in the conversation history
-                is_duplicate = False
-                for existing_msg in conversation_history:
-                    if (existing_msg.get('role') == 'assistant' and 
-                        existing_msg.get('content') == msg_content):
-                        is_duplicate = True
-                        logger.info(f"Skipping duplicate assistant message from {event_type}")
-                        break
-                
-                if not is_duplicate:
-                    # Add to conversation history
-                    assistant_message = {
-                        "role": "assistant",
-                        "content": msg_content,
-                        "timestamp": get_utc_now().isoformat(),
-                        "metadata": {
-                            "type": "response", 
-                            "event": event_type,
-                            "user_location": user_context.get("location", {}),
-                            "user_local_time": user_context.get("local_time", {})
-                        }
-                    }
-                    conversation_history.append(assistant_message)
-                    
-                    # Store updated conversation
-                    await store_full_conversation()
-                    logger.info(f"Added assistant message to conversation history from {event_type}, total messages: {len(conversation_history)}")
-            except Exception as e:
-                logger.error(f"Error storing assistant message from {event_type}: {str(e)}")
-                logger.error(f"Error type: {type(e)}")
-                logger.error(f"Full error details: {repr(e)}")
-
-        # Try multiple events for assistant responses
-        @agent.on("assistant_response")
-        def on_assistant_response(msg: llm.ChatMessage):
-            try:
-                logger.info(f"ASSISTANT RESPONSE EVENT FIRED: {msg.content}")
-                if isinstance(msg.content, list):
-                    msg_content = "\n".join(str(item) for item in msg.content)
-                else:
-                    msg_content = msg.content
-                
-                # Begin pre-generating the TTS audio for this response immediately
-                # This significantly reduces the lag between transcript and audio
-                if hasattr(agent, 'prepare_say'):
-                    asyncio.create_task(agent.prepare_say(msg_content))
-                    logger.info(f"Started preparing TTS for response")
-                
-                # Don't immediately add to conversation history - the agent will
-                # show the message when it starts speaking
-                # Instead, we just prepare the audio and let the agent's speech handling
-                # manage the transcript timing 
-                
-                # Only store messages that don't get spoken immediately
-                # (agent.say will handle transcript for immediate responses)
-                asyncio.create_task(store_assistant_message(msg_content, "assistant_response"))
-            except Exception as e:
-                logger.error(f"Error in assistant_response callback: {str(e)}")
-                logger.error(f"Error type: {type(e)}")
-                logger.error(f"Full error details: {repr(e)}")
-
-        @agent.on("message_sent")
-        def on_message_sent(msg: Any):
-            try:
-                logger.info(f"MESSAGE SENT EVENT FIRED: {msg}")
-                
-                # Check if this is an assistant message
-                if hasattr(msg, 'role') and msg.role == "assistant":
-                    if hasattr(msg, 'content'):
-                        if isinstance(msg.content, list):
-                            msg_content = "\n".join(str(item) for item in msg.content)
-                        else:
-                            msg_content = msg.content
-                        
-                        asyncio.create_task(store_assistant_message(msg_content, "message_sent"))
-            except Exception as e:
-                logger.error(f"Error in message_sent handler: {str(e)}")
-                logger.error(f"Error type: {type(e)}")
-                logger.error(f"Full error details: {repr(e)}")
-
-        @agent.on("llm_response_chunk")
-        def on_llm_response_chunk(chunk: Any):
-            logger.info(f"LLM RESPONSE CHUNK EVENT FIRED: {chunk}")
-            # We don't add partial chunks to the conversation, just log them
-        
-        @agent.on("llm_response_complete")
-        def on_llm_response_complete(msg: Any):
-            try:
-                logger.info(f"LLM RESPONSE COMPLETE EVENT FIRED: {msg}")
-                
-                # Check if this is an assistant message with content
-                if hasattr(msg, 'role') and msg.role == "assistant" and hasattr(msg, 'content'):
-                    if isinstance(msg.content, list):
-                        msg_content = "\n".join(str(item) for item in msg.content)
-                    else:
-                        msg_content = msg.content
-                    
-                    asyncio.create_task(store_assistant_message(msg_content, "llm_response_complete"))
-            except Exception as e:
-                logger.error(f"Error in llm_response_complete handler: {str(e)}")
-                logger.error(f"Error type: {type(e)}")
-                logger.error(f"Full error details: {repr(e)}")
-
-        # Add a message handler to log all messages for debugging
-        @agent.on("message")
-        def on_message(msg: Any):
-            try:
-                logger.info(f"MESSAGE EVENT RECEIVED: {msg}")
-                if hasattr(msg, 'content'):
-                    logger.info(f"Message content: {msg.content}")
-                if hasattr(msg, 'role'):
-                    logger.info(f"Message role: {msg.role}")
-                    
-                    # If this is an assistant message that we haven't captured through other events
-                    if msg.role == "assistant" and hasattr(msg, 'content'):
-                        # Check if we already have this message in our history
-                        msg_content = msg.content
-                        if isinstance(msg_content, list):
-                            msg_content = "\n".join(str(item) for item in msg_content)
-                        
-                        asyncio.create_task(store_assistant_message(msg_content, "message"))
-            except Exception as e:
-                logger.error(f"Error in message handler: {str(e)}")
-                logger.error(f"Error type: {type(e)}")
-                logger.error(f"Full error details: {repr(e)}")
+        # Register the handler using the same pattern as for other handlers
+        # For MultimodalAgent, the event might be different or handled internally
+        # Let's assume it still uses 'user_speech_committed' but provides a string
+        try:
+             user_speech_handler = agent.on("user_speech_committed", on_user_speech_committed)
+             logger.info("Registered user speech handler")
+        except Exception as e:
+             logger.error(f"Could not register user_speech_committed handler: {e}")
+             # The MultimodalAgent might handle user input differently
 
         # Start the agent
         agent.start(ctx.room)
 
         # Handle participant disconnection (e.g., when user clicks "end call" button)
-        @ctx.room.on("participant_disconnected")
-        async def on_participant_disconnected(participant: rtc.Participant):
+        # Needs to be synchronous, launch async tasks internally
+        def on_participant_disconnected_sync(participant: rtc.Participant):
             logger.info(f"Participant disconnected: {participant.identity}")
             logger.info("Frontend user ended the call - cleaning up resources")
-            
-            # Store final conversation state
-            await store_full_conversation()
-            
-            # Add a system message about the call being ended by user
-            end_message = {
-                "role": "system",
-                "content": "Call ended by user via frontend",
-                "timestamp": get_utc_now().isoformat(),
-                "metadata": {"type": "call_end", "reason": "user_ended"}
-            }
-            conversation_history.append(end_message)
-            await store_full_conversation()
-            
-            # Disconnect the room (this will happen automatically, but we make it explicit)
-            try:
-                if timeout_task and not timeout_task.done():
-                    timeout_task.cancel()
-                    logger.info("Cancelled timeout task")
+
+            async def async_disconnect_tasks():
+                # Store final conversation state
+                await store_full_conversation()
                 
-                # Give a moment for cleanup and then disconnect
-                await asyncio.sleep(1)
-                await ctx.room.disconnect()
-                logger.info("Room disconnected after user ended call")
-            except Exception as e:
-                logger.error(f"Error during room disconnect after user ended call: {str(e)}")
+                # Add a system message about the call being ended by user
+                end_message = {
+                    "role": "system",
+                    "content": "Call ended by user via frontend",
+                    "timestamp": get_utc_now().isoformat(),
+                    "metadata": {"type": "call_end", "reason": "user_ended", "stored": False} # Ensure it gets stored
+                }
+                conversation_history.append(end_message)
+                
+                # Critical: Ensure all messages are stored before disconnecting
+                # Use the dedicated method that provides proper error handling
+                await ensure_storage_completed()
+                
+                # Count any messages that failed to store for logging
+                failed_messages = sum(1 for msg in conversation_history if not msg.get("metadata", {}).get("stored", False))
+                if failed_messages > 0:
+                    logger.warning(f"Disconnecting with {failed_messages} unstored messages")
+                else:
+                    logger.info("All conversation messages successfully stored to database")
+                
+                # Disconnect the room (this will happen automatically, but we make it explicit)
+                try:
+                    global timeout_task
+                    if timeout_task and not timeout_task.done():
+                        timeout_task.cancel()
+                        logger.info("Cancelled timeout task")
+                    
+                    # Give a moment for cleanup and then disconnect
+                    await asyncio.sleep(1)
+                    await ctx.room.disconnect()
+                    logger.info("Room disconnected after user ended call")
+                except Exception as e:
+                    logger.error(f"Error during room disconnect after user ended call: {str(e)}")
+            
+            # Launch async tasks from the synchronous handler
+            asyncio.create_task(async_disconnect_tasks())
+
+        # Register the synchronous handler directly and store the reference
+        participant_disconnect_handler = ctx.room.on("participant_disconnected", on_participant_disconnected_sync)
+        logger.info("Registered participant disconnection handler")
 
         # Helper function to say something and ensure it's in the conversation history
         async def say_and_store(message_text):
@@ -1662,26 +1451,43 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
                 
                 # First, prepare the audio - this caches the audio before playback begins
                 # This helps reduce the delay between transcript and audio
-                preparation_task = asyncio.create_task(agent.prepare_say(message_text))
-                
-                # Wait for audio preparation to complete (or timeout after 5 seconds)
                 try:
-                    await asyncio.wait_for(preparation_task, timeout=5.0)
-                    logger.info(f"Audio prepared and ready for playback")
-                except asyncio.TimeoutError:
-                    logger.warning(f"Audio preparation timed out, proceeding anyway")
+                    preparation_task = asyncio.create_task(agent.prepare_say(message_text))
+                    
+                    # Wait for audio preparation to complete (or timeout after 5 seconds)
+                    try:
+                        await asyncio.wait_for(preparation_task, timeout=5.0)
+                        logger.info(f"Audio prepared and ready for playback")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Audio preparation timed out, proceeding anyway")
+                except Exception as e:
+                    logger.warning(f"Audio preparation not supported or failed: {str(e)}")
                 
                 # Now add to conversation history right before speaking
                 # This ensures transcription appears at roughly the same time as audio
                 conversation_history.append(assistant_message)
                 
-                # Store in database immediately before speech begins
-                await store_full_conversation()
+                # Store in database immediately before speech begins - use the direct method
+                storage_success = await ensure_storage_completed()
+                if not storage_success:
+                    logger.warning("Storage before speech may have failed, continuing with speech")
                 
                 # Now begin speaking (speech and transcript should be closely synchronized)
-                await agent.say(message_text, allow_interruptions=True)
+                try:
+                    await agent.say(message_text, allow_interruptions=True)
+                    logger.info("Speech completed successfully (agent.say returned).")
+                except asyncio.TimeoutError:
+                    logger.error("Timeout occurred during agent.say")
+                except Exception as say_e:
+                    logger.error(f"Error during agent.say: {say_e}")
+                    logger.error(f"Error type: {type(say_e)}")
                 
                 logger.info("Speech completed")
+                
+                # Verify this message was stored
+                if not assistant_message.get("metadata", {}).get("stored", False):
+                    logger.warning("Assistant message wasn't marked as stored during speech, trying again")
+                    await store_full_conversation()
             except Exception as e:
                 logger.error(f"Error in say_and_store: {str(e)}")
                 logger.error(f"Error type: {type(e)}")
@@ -1699,9 +1505,21 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
         # Use the optimized say_and_store method for the welcome message
         # This ensures that the transcript and speech are synchronized from the start
         await say_and_store(initial_message)
+        
+        # Ensure initial messages are stored
+        await ensure_storage_completed()
 
     finally:
-        # Cleanup timeout task if it exists
+        # Cleanup tasks
+        if 'periodic_saver_task' in globals() and periodic_saver_task and not periodic_saver_task.done():
+            periodic_saver_task.cancel()
+            try:
+                await periodic_saver_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Periodic saver task cleaned up")
+            
+        # Cancel the timeout task    
         if timeout_task and not timeout_task.done():
             timeout_task.cancel()
             try:
@@ -1710,35 +1528,166 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
                 pass
             logger.info("Timeout task cleaned up")
 
-def prewarm(proc: JobProcess):
-    """
-    Preload the voice activity detector (VAD) from Silero.
-    """
-    proc.userdata["vad"] = silero.VAD.load()
+# Initialize the OpenAI and Gemini APIs
+def init_apis():
+    global openai_client, gemini_initialized
+    
+    # Initialize OpenAI client
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if openai_api_key:
+        try:
+            openai_client = OpenAI(api_key=openai_api_key)
+            logger.info("OpenAI client initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client: {str(e)}")
+    else:
+        logger.warning("OPENAI_API_KEY not set, some functionality may be limited")
+    
+    # Initialize Gemini API
+    gemini_api_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_api_key:
+        try:
+            genai.configure(api_key=gemini_api_key)
+            gemini_initialized = True
+            logger.info("Gemini API initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Gemini API: {str(e)}")
+    else:
+        logger.warning("GEMINI_API_KEY not set, web search functionality may be limited")
+
+def sync_init_supabase():
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        init_result = loop.run_until_complete(init_supabase())
+        if not init_result:
+            # Indent error messages under the if condition
+            logger.error("Failed to initialize Supabase client. Please check your environment variables.")
+            logger.error("Required environment variables:")
+            logger.error("- SUPABASE_URL")
+            logger.error("- SUPABASE_SERVICE_ROLE_KEY")
+            # logger.error("- CARTESIA_API_KEY") # These seem unrelated to Supabase
+            # logger.error("- DEEPGRAM_API_KEY") # These seem unrelated to Supabase
+            raise Exception("Failed to initialize Supabase client")
+        # This part should be inside the try block if successful
+        logger.info("Supabase initialized successfully")
+        return init_result
+    except Exception as e:
+        logger.error(f"Error during Supabase initialization: {str(e)}")
+        return False
+    finally:
+        loop.close()
+
+# --- Pinecone Initialization and Querying --- #
+
+def init_pinecone():
+    """Initializes the Pinecone client and connects to the index."""
+    global pinecone_client, pinecone_index
+    pinecone_api_key = os.environ.get("PINECONE_API_KEY")
+    if not pinecone_api_key:
+        logger.error("PINECONE_API_KEY not set in environment variables. Knowledge base functionality disabled.")
+        return False
+    
+    try:
+        logger.info(f"Initializing Pinecone client...")
+        pinecone_client = Pinecone(api_key=pinecone_api_key)
+        
+        # Correctly get the list of index names
+        index_names = [index_info.name for index_info in pinecone_client.list_indexes()]
+        logger.info(f"Available Pinecone indexes: {index_names}")
+
+        # Check if index exists and connect
+        if PINECONE_INDEX_NAME not in index_names:
+            logger.error(f"Pinecone index '{PINECONE_INDEX_NAME}' does not exist. Knowledge base functionality disabled.")
+            pinecone_client = None # Disable client if index missing
+            return False
+            
+        logger.info(f"Connecting to Pinecone index: {PINECONE_INDEX_NAME}")
+        pinecone_index = pinecone_client.Index(PINECONE_INDEX_NAME)
+        logger.info(f"Successfully connected to Pinecone index '{PINECONE_INDEX_NAME}'.")
+        # Optional: Log index stats
+        try:
+            stats = pinecone_index.describe_index_stats()
+            logger.info(f"Pinecone index stats: {stats}")
+        except Exception as stat_e:
+            logger.warning(f"Could not retrieve Pinecone index stats: {stat_e}")
+            
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize Pinecone: {str(e)}")
+        pinecone_client = None # Ensure client is None on failure
+        pinecone_index = None
+        return False
+
+def get_embedding(text: str, model: str = EMBEDDING_MODEL):
+    """Generates embeddings for the given text using OpenAI."""
+    if not openai_client:
+        logger.error("OpenAI client not initialized. Cannot generate embeddings.")
+        return None
+    try:
+        text = text.replace("\n", " ")
+        response = openai_client.embeddings.create(input=[text], model=model)
+        return response.data[0].embedding
+    except Exception as e:
+        logger.error(f"Failed to get embedding from OpenAI: {str(e)}")
+        return None
+
+async def query_pinecone_knowledge_base(query: str, top_k: int = 3):
+    """Queries the Pinecone knowledge base and returns relevant text chunks."""
+    if not pinecone_index:
+        logger.warning("Pinecone index not available, skipping knowledge base query.")
+        return "Internal knowledge base is currently unavailable."
+        
+    try:
+        logger.info(f"Generating embedding for knowledge base query: {query[:50]}...")
+        query_embedding = get_embedding(query)
+        
+        if not query_embedding:
+            return "Could not process query for the knowledge base."
+            
+        logger.info(f"Querying Pinecone index '{PINECONE_INDEX_NAME}'...")
+        results = pinecone_index.query(
+            vector=query_embedding,
+            top_k=top_k,
+            include_metadata=True # Assuming metadata contains the text
+        )
+        
+        if not results or not results.matches:
+            logger.info("No relevant documents found in knowledge base.")
+            return "No specific information found in the knowledge base for that query."
+            
+        # Format results
+        context_str = "Found relevant information in the knowledge base:\n"
+        for i, match in enumerate(results.matches):
+            score = match.score
+            text_chunk = match.metadata.get('text', '[No text found in metadata]') # Adjust metadata field if needed
+            source = match.metadata.get('source', 'Unknown source') # Example: get source if available
+            context_str += f"\n{i+1}. (Score: {score:.2f}) From {source}:\n{text_chunk}\n"
+            
+        logger.info(f"Returning {len(results.matches)} results from knowledge base.")
+        return context_str.strip()
+        
+    except Exception as e:
+        logger.error(f"Error querying Pinecone knowledge base: {str(e)}")
+        return f"An error occurred while accessing the knowledge base: {str(e)}"
+
+# --- End Pinecone --- #
 
 if __name__ == "__main__":
     # Create a synchronous wrapper that runs the async init in a new event loop
-    def sync_init_supabase():
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            init_result = loop.run_until_complete(init_supabase())
-            if not init_result:
-                logger.error("Failed to initialize Supabase client. Please check your environment variables.")
-                logger.error("Required environment variables:")
-                logger.error("- SUPABASE_URL")
-                logger.error("- SUPABASE_SERVICE_ROLE_KEY")
-                logger.error("- CARTESIA_API_KEY")
-                logger.error("- DEEPGRAM_API_KEY")
-                raise Exception("Failed to initialize Supabase client")
-            logger.info("Supabase initialized successfully")
-            return init_result
-        except Exception as e:
-            logger.error(f"Error during Supabase initialization: {str(e)}")
-            return False
-        finally:
-            loop.close()
+    # Run the initialization before starting the app
+    if not sync_init_supabase():
+        logger.error("Supabase initialization failed, exiting")
+        import sys
+        sys.exit(1)
+    
+    # Initialize APIs
+    init_apis()
+    
+    # Initialize Pinecone
+    if not init_pinecone():
+        logger.warning("Pinecone initialization failed. Knowledge base functionality will be unavailable.")
     
     # Start health check HTTP server for deployment verification
     def start_health_check_server():
@@ -1788,12 +1737,6 @@ if __name__ == "__main__":
     # Record start time for uptime calculation
     START_TIME = time.time()
     
-    # Run the initialization before starting the app
-    if not sync_init_supabase():
-        logger.error("Supabase initialization failed, exiting")
-        import sys
-        sys.exit(1)
-    
     # Start health check server
     try:
         start_health_check_server()
@@ -1805,7 +1748,6 @@ if __name__ == "__main__":
     # Standard worker options without async_init
     worker_options = WorkerOptions(
             entrypoint_fnc=entrypoint,
-            prewarm_fnc=prewarm,
             worker_type=WorkerType.ROOM
         )
     

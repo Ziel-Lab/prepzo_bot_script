@@ -44,28 +44,28 @@ LIVEKIT_API_KEY=your_livekit_api_key
 ## Local Development Setup
 
 1. Clone the repository
-   ```bash
+```bash
    git clone https://github.com/your-username/prepzo_bot_script.git
    cd prepzo_bot_script
-   ```
+```
 
 2. Create a virtual environment
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
 
 3. Install dependencies
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+pip install -r requirements.txt
+```
 
 4. Set up environment variables by creating a `.env` file with the required values
 
 5. Run the application
-   ```bash
-   python main.py
-   ```
+```bash
+python main.py
+```
 
 ## Deployment
 
