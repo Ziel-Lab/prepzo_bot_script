@@ -6,8 +6,9 @@ import uuid
 import os
 import pathlib
 import time
+import pickle
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple, List
 from datetime import datetime, timezone
 import ipaddress
 import requests
@@ -37,6 +38,10 @@ import version
 import google.generativeai as genai
 from google.genai import types
 from pinecone import Pinecone, ServerlessSpec # Import Pinecone
+import base64
+import concurrent.futures
+import unittest.mock
+import traceback
 
 logger = logging.getLogger("my-worker")
 logger.setLevel(logging.INFO)
@@ -69,6 +74,34 @@ OPENAI_VOICE_ID = "alloy"
 # Default interview preparation prompt
 DEFAULT_INTERVIEW_PROMPT = prompt.prompt
 
+# Local backup for conversations when Supabase is unreachable
+LOCAL_BACKUP_DIR = pathlib.Path("./conversation_backups")
+RETRY_QUEUE_FILE = LOCAL_BACKUP_DIR / "retry_queue.pkl"
+MAX_RETRY_QUEUE_SIZE = 1000  # Maximum messages to store for retry
+
+# Retry queue for failed message storage attempts
+retry_queue = []
+
+# Add a flag to control verbose logging
+VERBOSE_LOGGING = False
+
+# Add a helper for conditional logging
+def verbose_log(message, level="info", error=None):
+    """Conditionally log based on verbose setting to reduce processing during conversation"""
+    if not VERBOSE_LOGGING:
+        return
+        
+    if level == "info":
+        logger.info(message)
+    elif level == "debug":
+        logger.debug(message)
+    elif level == "warning":
+        logger.warning(message)
+    elif level == "error":
+        logger.error(message)
+        if error:
+            logger.error(f"Error details: {error}")
+            
 # Helper function to get current UTC time
 def get_utc_now():
     """Get current UTC time in a timezone-aware manner"""
@@ -78,6 +111,11 @@ def get_utc_now():
     except AttributeError:
         # Fallback for earlier Python versions
         return datetime.now(timezone.utc)
+
+# Helper function to get current UTC time with consistent formatting
+def get_current_timestamp():
+    """Get current UTC time in ISO 8601 format with timezone information"""
+    return get_utc_now().isoformat()
 
 # This function now primarily defines the tool for Gemini
 # The actual search execution is handled by `handle_gemini_web_search`
@@ -217,13 +255,14 @@ async def perform_actual_search(search_query):
         return f"Web search failed during execution: {str(e)}"
 
 def verify_supabase_table():
-    """Verify that the conversation_histories table exists and has the correct structure"""
+    """Verify that the conversation_histories table exists and has the correct structure
+    Note: Supabase Python client is not async"""
     if not supabase:
         logger.error("Cannot verify table: Supabase client is not initialized")
         return False
         
     try:
-        # Check if table exists
+        # Check if table exists - Supabase client is not async
         result = supabase.table("conversation_histories").select("*").limit(1).execute()
         logger.info("Successfully connected to conversation_histories table")
         
@@ -243,149 +282,179 @@ def verify_supabase_table():
         return False
 
 async def init_supabase():
+    """Initialize the Supabase client with retry logic - Supabase client is not async"""
     global supabase
-    supabase_url = os.environ.get("SUPABASE_URL")
-    supabase_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     
-    if not supabase_url:
-        logger.error("SUPABASE_URL is not set in environment variables")
-        return False
-    if not supabase_role_key:
-        logger.error("SUPABASE_SERVICE_ROLE_KEY is not set in environment variables")
-        return False
-        
+    # If already initialized, return True
+    if supabase is not None:
+        try:
+            # Test connection with a simple query - Note: Supabase Python client is not async
+            response = supabase.table("conversation_histories").select("session_id").limit(1).execute()
+            logger.debug("Supabase connection is healthy")
+            return True
+        except Exception as e:
+            # Connection might be stale, attempt to recreate
+            logger.warning(f"Supabase connection test failed, will attempt to reconnect: {e}")
+            supabase = None
+    
+    # Initialize or reinitialize Supabase client
     try:
-        # Log the URL (with sensitive parts redacted)
-        masked_url = supabase_url.replace(supabase_role_key, '[REDACTED]')
-        logger.info(f"Initializing Supabase client with URL: {masked_url}")
+        supabase_url = os.environ.get("SUPABASE_URL")
+        supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
         
-        supabase = create_client(supabase_url, supabase_role_key)
-        logger.info("Supabase client initialized successfully")
-        
-        # Verify table structure
-        if not verify_supabase_table():
-            logger.error("Failed to verify conversation_histories table structure")
+        if not supabase_url or not supabase_key:
+            logger.error("Supabase environment variables not set")
+            logger.error("Required: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY")
             return False
         
-        # Test query to ensure we can access the table
-        test_result = supabase.table("conversation_histories").select("*").limit(1).execute()
-        logger.info("Successfully tested query on conversation_histories table")
-            
-        return True
+        # Create client with standard pattern - Supabase Python client is not async    
+        supabase = create_client(supabase_url, supabase_key)
+        
+        # Test the connection immediately to verify it works
+        try:
+            test_response = supabase.table("conversation_histories").select("session_id").limit(1).execute()
+            logger.info("Supabase client initialized and connected successfully")
+            return True
+        except Exception as test_error:
+            logger.error(f"Failed to test Supabase connection: {test_error}")
+            supabase = None
+            return False
     except Exception as e:
-        logger.error(f"Failed to initialize Supabase client: {str(e)}")
-        logger.error(f"Please check your SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables")
+        logger.error(f"Failed to initialize Supabase client: {e}")
+        supabase = None
         return False
 
-async def store_conversation_message(
-    session_id: str,
-    participant_id: str,
-    message_data: Dict[str, Any] # Pass the full message dictionary
-):
-    """Store a single conversation message in Supabase, mapping to the correct columns."""
+# Function to check Supabase connection health
+async def check_supabase_health():
+    """Check if Supabase connection is healthy and reconnect if needed"""
+    global supabase
+    
     if not supabase:
-        logger.error("Cannot store message: Supabase client is not initialized")
-        return
+        logger.warning("Supabase client not initialized, attempting to initialize")
+        return await init_supabase()
         
     try:
-        # Extract relevant parts
-        role = message_data.get("role", "unknown")
-        content = message_data.get("content", "")
-        timestamp = message_data.get("timestamp", get_utc_now().isoformat())
+        # Test the connection with a simple query - Supabase Python client is not async
+        test_result = supabase.table("conversation_histories").select("session_id").limit(1).execute()
+        logger.debug("Supabase connection is healthy")
+        return True
+    except Exception as e:
+        logger.warning(f"Supabase connection error: {e}, attempting to reconnect")
+        return await init_supabase()
+
+# Optimize store_conversation_message to be less resource-intensive
+async def store_conversation_message(session_id, participant_id, message_data):
+    """Store a conversation message in Supabase, with local backup on failure"""
+    
+    # Skip non-essential database operations if agent is actively speaking
+    is_speaking = agent and hasattr(agent, 'is_speaking') and agent.is_speaking
+    
+    # For system messages during speech, defer to retry queue instead of immediate storage
+    if is_speaking and participant_id == "system":
+        add_to_retry_queue(session_id, participant_id, message_data)
+        return False
+    
+    # Continue with existing storage logic
+    # Check Supabase connection first
+    supabase_available = await check_supabase_health()
+    
+    if not supabase_available:
+        logger.error("Supabase client not available, adding message to retry queue")
+        add_to_retry_queue(session_id, participant_id, message_data)
+        return False
+    
+    # Continue with existing logic
+    if not message_data:
+        logger.error("Message data is empty, skipping storage")
+        return False
+    
+    # Create a local backup of the message before attempting to store in Supabase
+    message_id = message_data.get("message_id", str(uuid.uuid4()))
+    
+    # Update message data to ensure it has a message_id
+    if "message_id" not in message_data:
+        message_data["message_id"] = message_id
         
-        # Validate required fields
-        if not session_id:
-            logger.error("Cannot store message: session_id is missing")
-            return None
+    # Create local backup
+    try:
+        backup_file = LOCAL_BACKUP_DIR / f"{session_id}_{message_id}.json"
+        LOCAL_BACKUP_DIR.mkdir(exist_ok=True, parents=True)
+        
+        with open(backup_file, 'w') as f:
+            json.dump({
+                "session_id": session_id,
+                "participant_id": participant_id,
+                "message_data": message_data
+            }, f)
+        verbose_log(f"Created local backup at {backup_file}", level="debug")
+    except Exception as e:
+        logger.error(f"Failed to create local backup: {e}")
+    
+    # Prepare data for insertion following Supabase documentation pattern
+    insert_data = {
+        "session_id": session_id,
+        "participant_id": participant_id,
+        "message_data": json.dumps(message_data) if isinstance(message_data, dict) else message_data,
+        "message_id": message_id,
+        "transcript": message_data.get("content", ""),  # Store transcript in separate column
+        "timestamp": message_data.get("timestamp", get_current_timestamp()),
+        "role": message_data.get("role", participant_id),
+    }
+    
+    # Use conditional logging to reduce verbosity during conversation
+    verbose_log(f"Storing message for session {session_id}, participant {participant_id}, message_id {message_id}")
+    
+    try:
+        # Use upsert with the documented format from Supabase docs - NOT async
+        response = (
+            supabase.table("conversation_histories")
+            .upsert([insert_data], on_conflict="message_id")  # Use an array of objects for upsert
+            .execute()
+        )
+        
+        # Check response structure following Supabase pattern
+        if hasattr(response, 'data') and response.data:
+            logger.info(f"Successfully stored message with ID: {message_id}")
             
-        if not content:
-            logger.warning("Storing message with empty content")
-        
-        # Generate a unique message ID if not present
-        if "message_id" not in message_data:
-            message_data["message_id"] = str(uuid.uuid4())
-        
-        message_id = message_data["message_id"]
-        
-        # Prepare data for insertion according to the table schema
-        data = {
-            "session_id": session_id,
-            "message_id": message_id,  # Add unique message ID to avoid PK conflicts
-            "participant_id": participant_id,
-            "conversation": message_data, # Store full message dict directly - Supabase will handle JSON conversion
-            "raw_conversation": content, # Store raw text content in text column
-            "timestamp": timestamp # Assuming this is the intended text timestamp column
-        }
-        
-        logger.info(f"Attempting to store message in conversation_histories:")
-        logger.info(f"  Session ID: {session_id}")
-        logger.info(f"  Message ID: {message_id}")
-        logger.info(f"  Role: {role}")
-        
-        # Following Supabase documentation pattern - use UPSERT instead of INSERT
-        # This handles the case where the primary key might be a composite of session_id + message_id
-        try:
-            result = (
-                supabase.table("conversation_histories")
-                .upsert(data, on_conflict="message_id")  # Use message_id as conflict resolution
-                .execute()
-            )
-            
-            if result.data:
-                logger.info(f"Successfully stored message. Data ID: {result.data[0].get('id', message_id)}")
-                return result
-            else:
-                logger.warning("Message storage response contained no data")
-                logger.warning(f"Response status: {getattr(result, 'status_code', 'unknown')}")
-                return None
-        except Exception as supabase_error:
-            error_str = str(supabase_error).lower()
-            
-            # Special handling for PK violation on session_id
-            if "duplicate key" in error_str and "conversation_histories_pkey" in error_str:
-                logger.warning("Primary key violation on session_id. Table likely has session_id as primary key.")
-                logger.warning("Attempting alternative storage approach...")
+            # Clean up the backup file
+            try:
+                if backup_file.exists():
+                    backup_file.unlink()
+                    verbose_log(f"Removed backup file after successful storage: {backup_file}", level="debug")
+            except Exception as e:
+                logger.error(f"Failed to remove backup file: {e}")
                 
-                try:
-                    # Try to create a new record with a generated ID field
-                    # This approach assumes the table may have an 'id' primary key instead of session_id
-                    if "id" not in data:
-                        data["id"] = str(uuid.uuid4())
-                    
-                    result = (
-                        supabase.table("conversation_histories")
-                        .upsert(data)
-                        .execute()
-                    )
-                    
-                    if result.data:
-                        logger.info(f"Alternative storage successful using ID: {data['id']}")
-                        return result
-                except Exception as alt_error:
-                    logger.error(f"Alternative storage also failed: {str(alt_error)}")
-            
-            # Regular error handling for other issues
-            logger.error(f"Supabase storage error: {str(supabase_error)}")
-            
-            # Check for common Supabase errors
-            if "duplicate" in error_str or "unique constraint" in error_str:
-                logger.warning("Possible duplicate message detected")
-            elif "too large" in error_str or "payload size" in error_str:
-                logger.warning("Message may be too large for Supabase")
-            elif "foreign key constraint" in error_str:
-                logger.warning("Foreign key constraint violation - session_id may not exist")
-            elif "permission denied" in error_str or "not authorized" in error_str:
-                logger.error("Permission denied - check Supabase RLS policies")
-            
-            # For this specific case (PK violation), return None instead of raising
-            # to allow the conversation to continue
-            return None
+            return True
+        elif hasattr(response, 'error') and response.error:
+            logger.error(f"Supabase upsert error: {response.error}")
+            add_to_retry_queue(session_id, participant_id, message_data)
+            return False
+        else:
+            # Handle unexpected response structure
+            logger.warning(f"Unexpected response from Supabase: {response}")
+            add_to_retry_queue(session_id, participant_id, message_data)
+            return False
             
     except Exception as e:
-        logger.error(f"Failed to store message in Supabase: {str(e)}")
-        logger.error(f"Error type: {type(e)}")
-        logger.error(f"Error details: {repr(e)}")
-        return None
+        error_type = type(e).__name__
+        error_message = str(e)
+        
+        # Log different error types differently
+        if "duplicate key" in error_message.lower():
+            verbose_log(f"Message already exists in database (duplicate key): {error_message}", level="warning")
+            return True  # Consider this a success as the message is already stored
+        elif "permission" in error_message.lower():
+            logger.error(f"Supabase permission error: {error_message}")
+        elif "network" in error_message.lower() or "timeout" in error_message.lower():
+            logger.error(f"Supabase network error: {error_message}")
+        else:
+            logger.error(f"Failed to store message: {error_type}: {error_message}")
+            # Only log full trace in verbose mode
+            verbose_log(f"Error details: {traceback.format_exc()}", level="error")
+        
+        # Add to retry queue for later processing
+        add_to_retry_queue(session_id, participant_id, message_data)
+        return False
 
 async def store_full_conversation():
     """
@@ -405,54 +474,95 @@ async def store_full_conversation():
     if not conversation_history:
         logger.info("No conversation history to store")
         return
-    
-    try:
-        logger.info(f"Storing full conversation with {len(conversation_history)} messages")
         
+    try:
         # Count how many messages need to be stored
         to_store_count = sum(1 for msg in conversation_history if not msg.get("metadata", {}).get("stored", False))
-        logger.info(f"Messages needing storage: {to_store_count}")
+        logger.info(f"Storing full conversation with {len(conversation_history)} messages ({to_store_count} unsaved)")
         
         if to_store_count == 0:
             logger.info("All messages already stored")
             return
             
-        store_count = 0
-        # Store each message in the conversation history that hasn't been stored yet
+        # Collect messages for batch upsert if possible
+        messages_to_store = []
+        
         for message in conversation_history:
-            if message.get("metadata", {}).get("stored", False): # Check the stored flag within metadata
+            if message.get("metadata", {}).get("stored", False):
                 continue  # Skip messages that have already been stored
             
-            # Try to store with up to 3 retries for important messages
-            max_retries = 3 if message.get("role") in ("system", "assistant") else 1
+            # If message doesn't have a message_id yet, add one
+            if "message_id" not in message:
+                message["message_id"] = str(uuid.uuid4())
+                
+            # Prepare the message for storage
+            insert_data = {
+                "session_id": session_id,
+                "participant_id": message.get("participant_id", message.get("role", "unknown")),
+                "message_data": json.dumps(message) if isinstance(message, dict) else message,
+                "message_id": message.get("message_id"),
+                "transcript": message.get("content", ""),
+                "timestamp": message.get("timestamp", get_current_timestamp()),
+                "role": message.get("role", "unknown"),
+            }
             
-            for attempt in range(max_retries):
-                try:
-                    # Store the message
-                    result = await store_conversation_message(
-                        session_id=session_id,
-                        participant_id=message.get("participant_id", message["role"]),
-                        message_data=message
-                    )
-                    
-                    if result:
-                        # Mark as stored to avoid duplicates
-                        if "metadata" not in message:
-                            message["metadata"] = {}
-                        message["metadata"]["stored"] = True
-                        store_count += 1
-                        break  # Successful storage, exit retry loop
-                    
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Retrying message storage (attempt {attempt+1}/{max_retries})")
-                        await asyncio.sleep(0.5)  # Short delay between retries
-                except Exception as e:
-                    logger.error(f"Error during storage attempt {attempt+1}: {str(e)}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(0.5)  # Short delay between retries
-            
+            messages_to_store.append(insert_data)
+        
+        # Store messages in batches to avoid overwhelming Supabase
+        batch_size = 10
+        success_count = 0
+        
+        for i in range(0, len(messages_to_store), batch_size):
+            batch = messages_to_store[i:i+batch_size]
+            try:
+                # Use proper upsert with array pattern - Supabase Python client is not async
+                response = (
+                    supabase.table("conversation_histories")
+                    .upsert(batch, on_conflict="message_id")
+                    .execute()
+                )
+                
+                if hasattr(response, 'data') and response.data:
+                    # Mark messages as stored
+                    for j, msg_data in enumerate(batch):
+                        # Find the corresponding message in conversation_history
+                        for msg in conversation_history:
+                            if msg.get("message_id") == msg_data["message_id"]:
+                                if "metadata" not in msg:
+                                    msg["metadata"] = {}
+                                msg["metadata"]["stored"] = True
+                                success_count += 1
+                                break
+                else:
+                    logger.warning(f"Unexpected response from batch upsert: {response}")
+            except Exception as e:
+                logger.error(f"Error during batch upsert: {e}")
+                # Individual fallback for failed batch
+                for msg_data in batch:
+                    try:
+                        # Individual storage with more detailed error handling
+                        single_response = (
+                            supabase.table("conversation_histories")
+                            .upsert([msg_data], on_conflict="message_id")
+                            .execute()
+                        )
+                        
+                        if hasattr(single_response, 'data') and single_response.data:
+                            for msg in conversation_history:
+                                if msg.get("message_id") == msg_data["message_id"]:
+                                    if "metadata" not in msg:
+                                        msg["metadata"] = {}
+                                    msg["metadata"]["stored"] = True
+                                    success_count += 1
+                                    break
+                    except Exception as single_error:
+                        logger.error(f"Error in fallback single storage: {single_error}")
+                        
+            # Small delay between batches
+            await asyncio.sleep(0.5)
+                
         # Verify success rate    
-        logger.info(f"Successfully stored {store_count}/{to_store_count} messages")
+        logger.info(f"Successfully stored {success_count}/{to_store_count} messages")
         
         # Final verification - important for debugging
         total_stored = sum(1 for msg in conversation_history if msg.get("metadata", {}).get("stored", False))
@@ -462,6 +572,18 @@ async def store_full_conversation():
         logger.error(f"Failed to store full conversation: {str(e)}")
         logger.error(f"Error type: {type(e)}")
         logger.error(f"Full error details: {repr(e)}")
+        
+        # Create emergency backup of any unsaved messages
+        try:
+            emergency_backup = [msg for msg in conversation_history if not msg.get("metadata", {}).get("stored", False)]
+            if emergency_backup:
+                backup_file = LOCAL_BACKUP_DIR / f"emergency_backup_{session_id}_{int(time.time())}.json"
+                LOCAL_BACKUP_DIR.mkdir(exist_ok=True, parents=True)
+                with open(backup_file, 'w') as f:
+                    json.dump(emergency_backup, f, indent=2)
+                logger.info(f"Created emergency backup at {backup_file} with {len(emergency_backup)} messages")
+        except Exception as backup_err:
+            logger.error(f"Failed to create emergency backup: {backup_err}")
 
 # Add a helper method to directly await the storage task when critical
 async def ensure_storage_completed():
@@ -1000,27 +1122,132 @@ async def entrypoint(ctx: JobContext):
         raise
 
 async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
+    global conversation_history, session_id, timeout_task, periodic_saver_task
+    global retry_processor_task  # Add this global declaration
+    
     try:
-        global conversation_history, session_id, timeout_task, periodic_saver_task
-        
+        # Capture initial metadata to associate with transcript
         logger.info(f"Participant metadata raw: '{participant.metadata}'")
         logger.info(f"Participant identity: {participant.identity}")
-        logger.info(f"Participant name: {participant.name}")
         
-        # Immediately create session ID
-        session_id = ctx.room.name
+        # Store LiveKit session details for better transcript association
+        room_name = ctx.room.name
+        room_sid = getattr(ctx.room, 'sid', 'unknown')
+        participant_identity = participant.identity
+        participant_sid = getattr(participant, 'sid', 'unknown')
+        
+        # Create a more robust session identifier that links to LiveKit
+        session_id = f"{room_name}_{int(time.time())}"
         logger.info(f"Starting new session with ID: {session_id}")
+        logger.info(f"LiveKit Room SID: {room_sid}, Participant SID: {participant_sid}")
+        
+        # Store initial session metadata for transcript context
+        initial_session_metadata = {
+            "role": "system",
+            "content": "Session started",
+            "timestamp": get_current_timestamp(),
+            "metadata": {
+                "type": "session_start",
+                "room_name": room_name,
+                "room_sid": room_sid,
+                "participant_identity": participant_identity,
+                "participant_sid": participant_sid,
+                "session_id": session_id,
+                "start_time": get_current_timestamp()
+            }
+        }
+        
+        # Add to conversation history
+        conversation_history = [initial_session_metadata]
+        
+        # Store initial metadata immediately
+        await store_conversation_message(
+            session_id=session_id,
+            participant_id="system",
+            message_data=initial_session_metadata
+        )
+        
+        # Auto-disconnect detection and handling
+        async def check_connection_status():
+            """Check if the connection is still alive by monitoring activity"""
+            inactivity_threshold = 300  # 5 minutes of inactivity triggers a disconnect
+            last_activity_time = time.time()  # Initialize with current time
+            
+            try:
+                while True:
+                    # Increased from 60 to 120 seconds to reduce check frequency
+                    await asyncio.sleep(120)  # Check every 2 minutes
+                    
+                    # Update last activity time if we have recent messages
+                    if conversation_history:
+                        latest_msg_time = conversation_history[-1].get("timestamp", 0)
+                        if isinstance(latest_msg_time, str):
+                            try:
+                                # Try to parse the timestamp if it's a string
+                                latest_dt = datetime.fromisoformat(latest_msg_time.replace('Z', '+00:00'))
+                                latest_msg_time = latest_dt.timestamp()
+                            except ValueError:
+                                latest_msg_time = 0
+                        
+                        if latest_msg_time > last_activity_time:
+                            last_activity_time = latest_msg_time
+                    
+                    # Check inactivity duration
+                    inactivity_duration = time.time() - last_activity_time
+                    if inactivity_duration > inactivity_threshold:
+                        logger.warning(f"Auto-disconnect triggered after {inactivity_duration:.1f} seconds of inactivity")
+                        
+                        # Add a system message about auto-disconnect
+                        system_msg = {
+                            "role": "system",
+                            "content": "Call automatically ended due to inactivity.",
+                            "timestamp": get_current_timestamp()
+                        }
+                        
+                        if system_msg not in conversation_history:
+                            conversation_history.append(system_msg)
+                            # Store in background task without awaiting
+                            asyncio.create_task(store_conversation_message(
+                                session_id=session_id,
+                                participant_id="system",
+                                message_data=system_msg
+                            ))
+                        
+                        # Force disconnection
+                        try:
+                            # Force disconnect after storing the final state
+                            raise ForceDisconnectError("Auto-disconnect triggered due to inactivity")
+                        except Exception as e:
+                            logger.error(f"Error during auto-disconnect: {e}")
+                            break
+                        
+            except asyncio.CancelledError:
+                logger.info("Connection status checker task cancelled")
+            except Exception as e:
+                logger.error(f"Error in connection status checker: {e}")
+        
+        # Start connection status checker
+        connection_checker_task = asyncio.create_task(check_connection_status())
         
         # Start a periodic task to ensure conversations are saved
         async def periodic_conversation_saver():
             try:
                 while True:
-                    await asyncio.sleep(30)  # Check every 30 seconds
+                    # Increased from 30 to 60 seconds to reduce storage frequency
+                    await asyncio.sleep(60)  # Check every minute
+                    
+                    # Skip if agent is actively speaking
+                    if agent and (hasattr(agent, 'is_speaking') and agent.is_speaking or 
+                                 hasattr(agent, 'should_pause_background_tasks') and agent.should_pause_background_tasks()):
+                        logger.debug("Skipping periodic save during active speech")
+                        continue
+                        
                     if conversation_history:
                         unsaved_count = sum(1 for msg in conversation_history if not msg.get("metadata", {}).get("stored", False))
                         if unsaved_count > 0:
                             logger.info(f"Periodic save: Found {unsaved_count} unsaved messages")
-                            await store_full_conversation()
+                            # Instead of awaiting, create a low-priority background task
+                            asyncio.create_task(store_full_conversation())
                         else:
                             logger.debug("Periodic save: All messages already saved")
             except asyncio.CancelledError:
@@ -1028,9 +1255,13 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
             except Exception as e:
                 logger.error(f"Error in periodic conversation saver: {e}")
                 
-        # Start the periodic saver task
+        # Start periodic save task 
         periodic_saver_task = asyncio.create_task(periodic_conversation_saver())
         logger.info("Started periodic conversation saver task")
+        
+        # Start periodic retry processor task
+        retry_processor_task = asyncio.create_task(periodic_retry_processor())
+        logger.info("Started periodic retry processor task")
         
         # Parse metadata safely
         try:
@@ -1188,17 +1419,73 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
                     modalities=["AUDIO"] # Start with audio, can add "TEXT" if needed
                 )
             )
-            logger.info("Successfully created MultimodalAgent.")
+            # Add is_speaking attribute for coordination
+            agent.is_speaking = False
             
-            # Add initial system prompt to history (if applicable, API might differ)
-            # This might not be necessary if `instructions` handles it
-            # if hasattr(agent, 'llm_engine') and hasattr(agent.llm_engine, 'add_to_history'):
-            #     try:
-            #         agent.llm_engine.add_to_history(role="system", content=system_instructions)
-            #         logger.info("Added system instructions to RealtimeModel history.")
-            #     except Exception as hist_e:
-            #         logger.error(f"Failed to add system instructions to history: {hist_e}")
+            # Add a lightweight method to check if the agent should pause background tasks
+            agent.should_pause_background_tasks = lambda: agent.is_speaking
+            
+            logger.info("Successfully created MultimodalAgent with is_speaking attribute.")
+            
+            # Update last_message_time when user speaks
+            # Event provides transcript string directly for MultimodalAgent
+            def on_user_speech_committed(transcript: str): 
+                try:
+                    global user_message  # Use global variable
                     
+                    # Skip minimal processing if speaking to avoid interruptions
+                    if agent.is_speaking:
+                        logger.debug("Received user speech while agent is speaking, deferring processing")
+                        
+                    # Track message time
+                    message_time = asyncio.get_event_loop().time()
+                    
+                    # Reduce logging during conversation
+                    logger.debug(f"User speech committed: {transcript[:30]}...")
+                    
+                    # Update the user_message variable (potentially for other uses)
+                    user_message = transcript
+                    
+                    # Create complete user message with LiveKit context
+                    user_chat_message = {
+                        "role": "user",
+                        "content": transcript,
+                        "timestamp": get_current_timestamp(),
+                        "message_id": str(uuid.uuid4()),
+                        "metadata": { 
+                            "type": "user_speech", 
+                            "stored": False,
+                            "room_name": room_name,
+                            "room_sid": room_sid,
+                            "participant_identity": participant_identity,
+                            "participant_sid": participant_sid,
+                            "session_id": session_id
+                        }
+                    }
+                    
+                    # Only add additional context data when not speaking to reduce processing
+                    if not agent.is_speaking:
+                        user_chat_message["metadata"]["user_location"] = user_context.get("location", {})
+                        user_chat_message["metadata"]["user_local_time"] = user_context.get("local_time", {})
+                    
+                    # Add to conversation history
+                    conversation_history.append(user_chat_message)
+                    
+                    # Create a low-priority background task for storage 
+                    asyncio.create_task(
+                        store_conversation_message(
+                            session_id=session_id,
+                            participant_id="user",
+                            message_data=user_chat_message
+                        )
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Error in user speech handler: {type(e).__name__}")
+            
+            # Register the handler with optimized processing
+            user_speech_handler = agent.on("user_speech_committed", on_user_speech_committed)
+            logger.info("Registered optimized user speech handler")
         except Exception as e:
             logger.error(f"Fatal error creating MultimodalAgent: {e}")
             logger.error("Cannot proceed without a working agent.")
@@ -1265,29 +1552,25 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
             search_results = await perform_actual_search(query_to_search)
 
             # Provide results back to Gemini
-            # For RealtimeModel, the way to return function results might differ.
-            # It might involve sending a specific message type or using a callback.
-            # This example assumes we log it and potentially add to history if possible.
             if search_results and not search_results.startswith("Unable") and not search_results.startswith("Web search failed"):
                 logger.info("Web search successful. Results logged. Returning result string conceptually.")
-                # Conceptual return - Actual mechanism TBD based on plugin API
-                # Example: Maybe return a dictionary? {'tool_name': 'search_web', 'result': f"Web search results...{search_results}"}
-                # Example: Or add to history if that's the mechanism
+                
+                # Attempt to add to history as a system message
                 try:
                     # Attempt to add to history as a system message
                     if hasattr(agent, 'add_to_history'): # Check if agent has this method
-                         await agent.add_to_history(role="system", content=f"Web search results for '{search_query}':\n{search_results}")
-                         await store_full_conversation()
-                         logger.info("Attempted to add web search results to MultimodalAgent history.")
+                        await agent.add_to_history(role="system", content=f"Web search results for '{search_query}':\n{search_results}")
+                        await store_full_conversation()
+                        logger.info("Attempted to add web search results to MultimodalAgent history.")
                     else:
-                         logger.warning("MultimodalAgent may not support add_to_history directly. Results not added.")
+                        logger.warning("MultimodalAgent may not support add_to_history directly. Results not added.")
                 except Exception as e:
                     logger.error(f"Failed to add search results to history: {e}")
-                # This return should be outside the try/except, but inside the if block
-                return f"Web search results for '{search_query}':\n{search_results}" # Placeholder return 
+                
+                return f"Web search results for '{search_query}':\n{search_results}" 
             else:
                 logger.error(f"Web search failed or returned no results.")
-                return "Web search failed." # Placeholder return
+                return "Web search failed."
 
         # Function to handle the knowledge base query when called by Gemini
         async def handle_knowledge_base_query(query: str):
@@ -1299,83 +1582,36 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
             
             # Provide results back to Gemini (Conceptual return similar to web search)
             if kb_results and not kb_results.startswith("Internal knowledge base is currently unavailable") \
-               and not kb_results.startswith("Could not process query") \
-               and not kb_results.startswith("No specific information found") \
-               and not kb_results.startswith("An error occurred"):
+                and not kb_results.startswith("Could not process query") \
+                and not kb_results.startswith("No specific information found") \
+                and not kb_results.startswith("An error occurred"):
                 logger.info("Knowledge base query successful. Results logged. Returning result string conceptually.")
-                # Conceptual return
+                
+                # Attempt to add to history as a system message
                 try:
-                     if hasattr(agent, 'add_to_history'):
-                         await agent.add_to_history(role="system", content=kb_results)
-                         await store_full_conversation()
-                         logger.info("Attempted to add knowledge base results to MultimodalAgent history.")
-                     else:
-                         logger.warning("MultimodalAgent may not support add_to_history directly. KB Results not added.")
+                    if hasattr(agent, 'add_to_history'):
+                        await agent.add_to_history(role="system", content=kb_results)
+                        await store_full_conversation()
+                        logger.info("Attempted to add knowledge base results to MultimodalAgent history.")
+                    else:
+                        logger.warning("MultimodalAgent may not support add_to_history directly. KB Results not added.")
                 except Exception as e:
                     logger.error(f"Failed to add knowledge base results to history: {e}")
-                # This return should be outside the try/except, but inside the if block
-                return kb_results # Placeholder return
+                
+                return kb_results # Return this after the try/except block
             else:
                 logger.info(f"Knowledge base query failed or returned no results: {kb_results}")
+                
                 # Optionally inform LLM that nothing was found
                 try:
-                     if hasattr(agent, 'add_to_history'):
-                         await agent.add_to_history(role="system", content="The knowledge base query did not return relevant information.")
-                     else:
-                         logger.warning("MultimodalAgent may not support add_to_history directly. KB empty result not added.")
+                    if hasattr(agent, 'add_to_history'):
+                        await agent.add_to_history(role="system", content="The knowledge base query did not return relevant information.")
+                    else:
+                        logger.warning("MultimodalAgent may not support add_to_history directly. KB empty result not added.")
                 except Exception as e:
-                     logger.error(f"Failed to add KB empty result message to history: {e}")
-                # This return should be outside the try/except, but inside the else block
-                return "Knowledge base query did not return relevant information." # Placeholder return
-
-        # Update last_message_time when user speaks
-        # Event provides transcript string directly for MultimodalAgent
-        def on_user_speech_committed(transcript: str): 
-            try:
-                global user_message  # Use global variable
+                    logger.error(f"Failed to add KB empty result message to history: {e}")
                 
-                # Track message time
-                message_time = asyncio.get_event_loop().time()
-                logger.info(f"User speech committed at time: {message_time}")
-                
-                logger.info(f"User speech committed (transcript): {transcript}")
-                msg_content = transcript # Use the transcript string directly
-                
-                # Update the user_message variable (potentially for other uses)
-                user_message = msg_content
-                
-                # Store user message
-                user_chat_message = {
-                    "role": "user",
-                    "content": msg_content,
-                    "timestamp": get_utc_now().isoformat(),
-                    "metadata": { 
-                        "type": "user_speech", 
-                        "stored": False, # Mark for storage
-                        "user_location": user_context.get("location", {}),
-                        "user_local_time": user_context.get("local_time", {})
-                    }
-                }
-                conversation_history.append(user_chat_message)
-                
-                # Create a dedicated task to ensure storage completes, but don't wait for it
-                # This allows the handler to return quickly while ensuring storage happens
-                asyncio.create_task(store_full_conversation())
-                logger.info(f"Created storage task for user message: {msg_content[:30]}...")
-                
-            except Exception as e:
-                logger.error(f"Error in on_user_speech_committed: {str(e)}")
-                logger.error(f"Full error details: {repr(e)}")
-
-        # Register the handler using the same pattern as for other handlers
-        # For MultimodalAgent, the event might be different or handled internally
-        # Let's assume it still uses 'user_speech_committed' but provides a string
-        try:
-             user_speech_handler = agent.on("user_speech_committed", on_user_speech_committed)
-             logger.info("Registered user speech handler")
-        except Exception as e:
-             logger.error(f"Could not register user_speech_committed handler: {e}")
-             # The MultimodalAgent might handle user input differently
+                return "Knowledge base query did not return relevant information." # Return this after the try/except block
 
         # Start the agent
         agent.start(ctx.room)
@@ -1387,20 +1623,37 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
             logger.info("Frontend user ended the call - cleaning up resources")
 
             async def async_disconnect_tasks():
-                # Store final conversation state
-                await store_full_conversation()
-                
-                # Add a system message about the call being ended by user
-                end_message = {
+                # Create a complete session end message with full context
+                session_end_message = {
                     "role": "system",
                     "content": "Call ended by user via frontend",
-                    "timestamp": get_utc_now().isoformat(),
-                    "metadata": {"type": "call_end", "reason": "user_ended", "stored": False} # Ensure it gets stored
+                    "timestamp": get_current_timestamp(),
+                    "message_id": str(uuid.uuid4()),
+                    "metadata": {
+                        "type": "session_end", 
+                        "reason": "user_ended", 
+                        "room_name": room_name,
+                        "room_sid": room_sid,
+                        "participant_identity": participant_identity,
+                        "participant_sid": participant_sid,
+                        "session_id": session_id,
+                        "end_time": get_current_timestamp(),
+                        "stored": False
+                    }
                 }
-                conversation_history.append(end_message)
+                conversation_history.append(session_end_message)
                 
-                # Critical: Ensure all messages are stored before disconnecting
-                # Use the dedicated method that provides proper error handling
+                # Store final session state and end message
+                await store_conversation_message(
+                    session_id=session_id,
+                    participant_id="system",
+                    message_data=session_end_message
+                )
+                
+                # Store full conversation to ensure complete transcript
+                await store_full_conversation()
+                
+                # Ensure all messages are properly stored
                 await ensure_storage_completed()
                 
                 # Count any messages that failed to store for logging
@@ -1423,25 +1676,30 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
                     logger.info("Room disconnected after user ended call")
                 except Exception as e:
                     logger.error(f"Error during room disconnect after user ended call: {str(e)}")
-            
-            # Launch async tasks from the synchronous handler
+
+            # Launch async tasks from synchronous handler
             asyncio.create_task(async_disconnect_tasks())
 
         # Register the synchronous handler directly and store the reference
         participant_disconnect_handler = ctx.room.on("participant_disconnected", on_participant_disconnected_sync)
         logger.info("Registered participant disconnection handler")
 
-        # Helper function to say something and ensure it's in the conversation history
+        # Optimize speech handling to minimize interruptions  
         async def say_and_store(message_text):
             try:
-                # Create a message but don't add to conversation history yet
-                # This delays the transcript until the speech is about to begin
+                # Create a message with complete LiveKit context
                 assistant_message = {
                     "role": "assistant",
                     "content": message_text,
-                    "timestamp": get_utc_now().isoformat(),
+                    "timestamp": get_current_timestamp(),
+                    "message_id": str(uuid.uuid4()),
                     "metadata": {
-                        "type": "direct_say",
+                        "type": "agent_speech",
+                        "room_name": room_name,
+                        "room_sid": room_sid,
+                        "participant_identity": participant_identity,
+                        "participant_sid": participant_sid,
+                        "session_id": session_id,
                         "user_location": user_context.get("location", {}),
                         "user_local_time": user_context.get("local_time", {})
                     }
@@ -1467,38 +1725,67 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
                 # This ensures transcription appears at roughly the same time as audio
                 conversation_history.append(assistant_message)
                 
-                # Store in database immediately before speech begins - use the direct method
-                storage_success = await ensure_storage_completed()
-                if not storage_success:
-                    logger.warning("Storage before speech may have failed, continuing with speech")
+                # Create a background task for storage instead of awaiting it
+                # This prevents blocking the speech
+                storage_task = asyncio.create_task(store_conversation_message(
+                    session_id=session_id,
+                    participant_id="assistant",
+                    message_data=assistant_message
+                ))
                 
                 # Now begin speaking (speech and transcript should be closely synchronized)
                 try:
+                    # Set a speaking flag before starting speech
+                    if hasattr(agent, 'is_speaking'):
+                        agent.is_speaking = True
+                        
                     await agent.say(message_text, allow_interruptions=True)
                     logger.info("Speech completed successfully (agent.say returned).")
+                    
+                    # Reset speaking flag after speech completes
+                    if hasattr(agent, 'is_speaking'):
+                        agent.is_speaking = False
+                        
                 except asyncio.TimeoutError:
                     logger.error("Timeout occurred during agent.say")
+                    # Reset speaking flag on error
+                    if hasattr(agent, 'is_speaking'):
+                        agent.is_speaking = False
                 except Exception as say_e:
                     logger.error(f"Error during agent.say: {say_e}")
                     logger.error(f"Error type: {type(say_e)}")
+                    # Reset speaking flag on error
+                    if hasattr(agent, 'is_speaking'):
+                        agent.is_speaking = False
                 
                 logger.info("Speech completed")
                 
-                # Verify this message was stored
-                if not assistant_message.get("metadata", {}).get("stored", False):
-                    logger.warning("Assistant message wasn't marked as stored during speech, trying again")
-                    await store_full_conversation()
+                # Wait for storage to complete after speech is done
+                try:
+                    await asyncio.wait_for(storage_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Storage task timed out, continuing anyway")
+                    
             except Exception as e:
                 logger.error(f"Error in say_and_store: {str(e)}")
                 logger.error(f"Error type: {type(e)}")
                 logger.error(f"Full error details: {repr(e)}")
                 
+                # Reset speaking flag in case of errors
+                if hasattr(agent, 'is_speaking'):
+                    agent.is_speaking = False
+                    
                 # Ensure the message is still stored even if speaking fails
-                if assistant_message not in conversation_history:
+                if 'assistant_message' in locals() and assistant_message not in conversation_history:
                     conversation_history.append(assistant_message)
-                    await store_full_conversation()
+                    # Use create_task instead of awaiting
+                    asyncio.create_task(store_conversation_message(
+                        session_id=session_id,
+                        participant_id="assistant",
+                        message_data=assistant_message
+                    ))
                 logger.error("Stored message despite speech error")
-
+        
         # Send initial welcome message
         initial_message = "Hi, I am Prepzo. I can help you with any professional problem you're having. I have access to the latest information through web search, so feel free to ask me about current job trends, recent interview practices, or any career-related questions."
         
@@ -1508,25 +1795,39 @@ async def run_multimodal_agent(ctx: JobContext, participant: rtc.Participant):
         
         # Ensure initial messages are stored
         await ensure_storage_completed()
-
+    
     finally:
         # Cleanup tasks
-        if 'periodic_saver_task' in globals() and periodic_saver_task and not periodic_saver_task.done():
-            periodic_saver_task.cancel()
-            try:
-                await periodic_saver_task
-            except asyncio.CancelledError:
-                pass
-            logger.info("Periodic saver task cleaned up")
+        try:
+            # Cancel any running tasks
+            if timeout_task:
+                timeout_task.cancel()
+            if periodic_saver_task:
+                periodic_saver_task.cancel()
+            if retry_processor_task:
+                retry_processor_task.cancel()
+            if 'connection_checker_task' in locals() and connection_checker_task:
+                connection_checker_task.cancel()
+                
+            await ensure_storage_completed()
             
-        # Cancel the timeout task    
-        if timeout_task and not timeout_task.done():
-            timeout_task.cancel()
+            # Process any remaining items in the retry queue
+            if retry_queue:
+                await process_retry_queue()
+            
+            # Final log for debugging
+            logger.info(f"Agent shutdown complete, {len(conversation_history)} messages in conversation history")
+            
+        except Exception as e:
+            logger.error(f"Error during agent shutdown: {e}")
+            # In case of shutdown errors, try to save conversation history to local backup
             try:
-                await timeout_task
-            except asyncio.CancelledError:
-                pass
-            logger.info("Timeout task cleaned up")
+                backup_path = LOCAL_BACKUP_DIR / f"shutdown_backup_{session_id}.json"
+                with open(backup_path, 'w') as f:
+                    json.dump(conversation_history, f, indent=2)
+                logger.info(f"Saved shutdown backup to {backup_path}")
+            except Exception as backup_err:
+                logger.error(f"Failed to create shutdown backup: {backup_err}")
 
 # Initialize the OpenAI and Gemini APIs
 def init_apis():
@@ -1556,28 +1857,44 @@ def init_apis():
         logger.warning("GEMINI_API_KEY not set, web search functionality may be limited")
 
 def sync_init_supabase():
+    """Synchronous wrapper for async Supabase initialization"""
     import asyncio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        init_result = loop.run_until_complete(init_supabase())
-        if not init_result:
-            # Indent error messages under the if condition
-            logger.error("Failed to initialize Supabase client. Please check your environment variables.")
-            logger.error("Required environment variables:")
-            logger.error("- SUPABASE_URL")
-            logger.error("- SUPABASE_SERVICE_ROLE_KEY")
-            # logger.error("- CARTESIA_API_KEY") # These seem unrelated to Supabase
-            # logger.error("- DEEPGRAM_API_KEY") # These seem unrelated to Supabase
-            raise Exception("Failed to initialize Supabase client")
-        # This part should be inside the try block if successful
-        logger.info("Supabase initialized successfully")
-        return init_result
+        # Initialize directly in the synchronous context
+        global supabase
+        
+        supabase_url = os.environ.get("SUPABASE_URL")
+        supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        
+        if not supabase_url or not supabase_key:
+            logger.error("Supabase environment variables not set")
+            logger.error("Required: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY")
+            return False
+        
+        # Create client with standard pattern - Supabase Python client is synchronous
+        try:
+            supabase = create_client(supabase_url, supabase_key)
+            
+            # Test the connection immediately to verify it works
+            test_response = supabase.table("conversation_histories").select("session_id").limit(1).execute()
+            logger.info("Supabase client initialized and connected successfully")
+            return True
+        except Exception as client_error:
+            logger.error(f"Failed to initialize or test Supabase client: {client_error}")
+            supabase = None
+            return False
+        
     except Exception as e:
         logger.error(f"Error during Supabase initialization: {str(e)}")
         return False
     finally:
-        loop.close()
+        # Always close the event loop to avoid resource leaks
+        try:
+            loop.close()
+        except Exception as e:
+            logger.error(f"Error closing event loop: {e}")
 
 # --- Pinecone Initialization and Querying --- #
 
@@ -1673,6 +1990,197 @@ async def query_pinecone_knowledge_base(query: str, top_k: int = 3):
         return f"An error occurred while accessing the knowledge base: {str(e)}"
 
 # --- End Pinecone --- #
+
+# Initialize local backup directory
+def init_local_backup():
+    """Create local backup directory for conversation storage"""
+    try:
+        if not LOCAL_BACKUP_DIR.exists():
+            LOCAL_BACKUP_DIR.mkdir(parents=True)
+            logger.info(f"Created local backup directory at {LOCAL_BACKUP_DIR.absolute()}")
+        
+        # Load any existing retry queue
+        global retry_queue
+        if RETRY_QUEUE_FILE.exists():
+            try:
+                with open(RETRY_QUEUE_FILE, 'rb') as f:
+                    retry_queue = pickle.load(f)
+                    logger.info(f"Loaded {len(retry_queue)} messages from retry queue")
+            except Exception as e:
+                logger.error(f"Failed to load retry queue: {e}")
+                retry_queue = []
+        
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize local backup: {e}")
+        return False
+
+# Save retry queue to disk
+def save_retry_queue():
+    """Save current retry queue to disk"""
+    if not LOCAL_BACKUP_DIR.exists():
+        try:
+            LOCAL_BACKUP_DIR.mkdir(parents=True)
+        except Exception as e:
+            logger.error(f"Failed to create backup directory: {e}")
+            return False
+    
+    try:
+        with open(RETRY_QUEUE_FILE, 'wb') as f:
+            pickle.dump(retry_queue, f)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save retry queue: {e}")
+        return False
+
+# Add a message to retry queue
+def add_to_retry_queue(session_id, participant_id, message_data):
+    """Add a failed message to the retry queue"""
+    global retry_queue
+    
+    # Create a retry item with timestamp
+    retry_item = {
+        "timestamp": datetime.now().isoformat(),
+        "session_id": session_id,
+        "participant_id": participant_id,
+        "message_data": message_data,
+        "retry_count": 0
+    }
+    
+    # Add to queue and trim if too large
+    retry_queue.append(retry_item)
+    if len(retry_queue) > MAX_RETRY_QUEUE_SIZE:
+        retry_queue = retry_queue[-MAX_RETRY_QUEUE_SIZE:]  # Keep only the newest messages
+    
+    # Save queue to disk
+    save_retry_queue()
+    logger.info(f"Added message to retry queue (queue size: {len(retry_queue)})")
+    
+    return True
+
+# Add a dedicated retry processor with adjustable batch size
+async def process_retry_queue(batch_size=10):
+    """Process the retry queue to attempt to store failed messages"""
+    global retry_queue
+    
+    if not retry_queue:
+        return 0
+        
+    if not supabase:
+        logger.warning("Cannot process retry queue: Supabase client is not initialized")
+        return 0
+    
+    total_queue_size = len(retry_queue)
+    logger.info(f"Processing retry queue with {total_queue_size} messages (batch size: {batch_size})")
+    
+    # Process in batches to avoid overwhelming the database
+    processed_count = 0
+    success_count = 0
+    
+    # Process only up to batch_size items per run to limit impact
+    items_to_process = min(batch_size, len(retry_queue))
+    temp_queue = retry_queue[:items_to_process]
+    
+    # Remove processed items from the queue
+    retry_queue = retry_queue[items_to_process:]
+    
+    for item in temp_queue:
+        processed_count += 1
+        
+        # Skip items that have been retried too many times
+        if item.get("retry_count", 0) >= 5:
+            logger.warning(f"Skipping message that has failed {item['retry_count']} times")
+            
+            # Archive permanently failed message to disk
+            try:
+                failed_file = LOCAL_BACKUP_DIR / f"failed_{item['session_id']}_{uuid.uuid4()}.json"
+                with open(failed_file, 'w') as f:
+                    json.dump(item, f, indent=2)
+            except Exception as e:
+                logger.error(f"Failed to archive permanently failed message: {e}")
+                
+            continue
+            
+        # Attempt to store the message - note the function is still async but internally handles
+        # the non-async Supabase client properly
+        try:
+            # Check Supabase health synchronously before attempting storage
+            supabase_healthy = await check_supabase_health()
+            
+            if not supabase_healthy:
+                logger.warning("Supabase connection not healthy, adding back to retry queue")
+                item["retry_count"] = item.get("retry_count", 0) + 1
+                retry_queue.append(item)
+                continue
+                
+            # Pass the data to the store_conversation_message function which handles
+            # the Supabase client operations correctly (without await for actual client calls)
+            result = await store_conversation_message(
+                session_id=item["session_id"],
+                participant_id=item["participant_id"],
+                message_data=item["message_data"]
+            )
+            
+            if result:
+                success_count += 1
+                # Message was successfully stored, no need to add back to queue
+            else:
+                # Message storage failed, increment retry count and add back to the queue
+                item["retry_count"] = item.get("retry_count", 0) + 1
+                retry_queue.append(item)
+        except Exception as e:
+            logger.error(f"Error processing retry item: {e}")
+            # Add back to queue with incremented retry count
+            item["retry_count"] = item.get("retry_count", 0) + 1
+            retry_queue.append(item)
+        
+        # Yield control back to the event loop more frequently
+        await asyncio.sleep(0.2)
+    
+    # Save updated retry queue
+    save_retry_queue()
+    
+    logger.info(f"Retry queue processing: {success_count}/{processed_count} messages stored, {len(retry_queue)} remaining")
+    
+    return success_count
+
+# Enhanced periodic retry task with reduced frequency and optimized background processing
+async def periodic_retry_processor():
+    """Periodically process the retry queue"""
+    try:
+        # Initial delay to avoid startup contention
+        await asyncio.sleep(30)
+        
+        while True:
+            # Increased from 60 to 180 seconds to reduce frequency
+            await asyncio.sleep(180)  # Process retry queue every 3 minutes
+            
+            # Skip if queue is empty (most common case)
+            if not retry_queue:
+                continue
+                
+            # Skip if agent is actively speaking to avoid interruptions
+            if agent and (hasattr(agent, 'is_speaking') and agent.is_speaking or 
+                         hasattr(agent, 'should_pause_background_tasks') and agent.should_pause_background_tasks()):
+                logger.debug("Skipping retry processing during active speech")
+                continue
+                
+            # Only process when supabase is connected and retry queue has items
+            if await init_supabase():
+                # Process a smaller batch size to reduce impact
+                await process_retry_queue(batch_size=5)
+            else:
+                logger.warning("Skipping retry processing due to Supabase connection issues")
+            
+    except asyncio.CancelledError:
+        logger.info("Periodic retry processor task cancelled")
+    except Exception as e:
+        logger.error(f"Error in periodic retry processor: {e}")
+
+# Custom exception for forced disconnection
+class ForceDisconnectError(Exception):
+    """Raised to force a disconnection in certain scenarios"""
+    pass
 
 if __name__ == "__main__":
     # Create a synchronous wrapper that runs the async init in a new event loop
